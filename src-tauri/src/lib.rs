@@ -16,14 +16,20 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 mod logging;
 mod pure;
 use pure::{
-    anchor_position, build_export, clamp_position, cursor_position, friendly_http_error,
-    normalize_config, normalize_url, parse_import, push_history, resolve_prompt, write_atomic,
-    ConfigInput, ConfigView, HistoryEntry, StoredConfig, WorkArea, CURSOR_GAP, DEFAULT_MAX_CHARS,
-    POSITION_MODE_ANCHOR, POSITION_MODE_REMEMBER,
+    anchor_position, build_export, clamp_position, cursor_position, friendly_http_error, is_newer,
+    normalize_config, normalize_url, normalize_version, parse_import, push_history, resolve_prompt,
+    write_atomic, ConfigInput, ConfigView, HistoryEntry, StoredConfig, WorkArea, CURSOR_GAP,
+    DEFAULT_MAX_CHARS, POSITION_MODE_ANCHOR, POSITION_MODE_REMEMBER,
 };
 
 const KEYRING_SERVICE: &str = "LingoNote";
 const KEYRING_USER: &str = "api-key";
+
+/// GitHub Releases 仓库与更新检查端点（SPEC 3.2）。
+const UPDATE_REPO: &str = "SeaTownHZ/LingoNote";
+const DEFAULT_UPDATE_API: &str = "https://api.github.com";
+const UPDATE_TIMEOUT: Duration = Duration::from_secs(8);
+const UPDATE_NOTES_LIMIT: usize = 4000;
 
 static CONFIG_WARNING: Mutex<Option<String>> = Mutex::new(None);
 
@@ -84,6 +90,17 @@ struct AppInfo {
     history_path: String,
     log_dir: String,
     hotkey_paused: bool,
+}
+
+/// 更新检查结果（SPEC 3.2 契约）。
+#[derive(Debug, Clone, Serialize)]
+pub struct UpdateInfo {
+    pub current: String,
+    pub latest: String,
+    pub has_update: bool,
+    pub url: String,
+    pub notes: String,
+    pub published_at: String,
 }
 
 // ---------- 配置与路径 ----------
@@ -393,6 +410,174 @@ fn reset_config(app: AppHandle, state: State<'_, HotkeyState>) -> Result<ConfigV
     let _ = app.emit_to("note", "config-changed", ());
     logging::info("config reset to defaults");
     Ok(build_config_view(&app, &state))
+}
+
+// ---------- 更新检查（SPEC 3.2） ----------
+
+/// 更新 API 基址：默认 GitHub；`LINGONOTE_UPDATE_API` 仅供本地烟测/CI 覆盖。
+fn update_api_base() -> String {
+    match std::env::var("LINGONOTE_UPDATE_API") {
+        Ok(value) => {
+            let trimmed = value.trim().trim_end_matches('/');
+            if trimmed.is_empty() {
+                DEFAULT_UPDATE_API.to_string()
+            } else {
+                trimmed.to_string()
+            }
+        }
+        Err(_) => DEFAULT_UPDATE_API.to_string(),
+    }
+}
+
+fn update_check_error(status: u16) -> String {
+    match status {
+        403 | 429 => "GitHub 接口访问受限，请稍后重试".into(),
+        404 => "尚未找到已发布的版本".into(),
+        500..=599 => "更新服务暂时不可用".into(),
+        code => format!("HTTP {code}"),
+    }
+}
+
+/// 仅放行 GitHub HTTPS 链接，并拒绝会被 `cmd /C start` 解析成命令的字符。
+fn is_allowed_release_url(url: &str) -> bool {
+    url.starts_with("https://github.com/")
+        && !url.chars().any(|c| {
+            c.is_whitespace()
+                || c.is_control()
+                || matches!(
+                    c,
+                    '"' | '\'' | '`' | '&' | '|' | '<' | '>' | '^' | '%' | '\\'
+                )
+        })
+}
+
+fn open_in_browser(url: &str) -> std::io::Result<std::process::ExitStatus> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+
+        // 避免 `cmd` 的控制台窗口在打开浏览器时闪一下。
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(url).status()
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open").arg(url).status()
+    }
+}
+
+/// 检查 GitHub Releases 最新版本；任何失败都返回中文 `Err`，不 panic、不重试。
+#[tauri::command]
+async fn check_update() -> Result<UpdateInfo, String> {
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let request_url = format!(
+        "{}/repos/{UPDATE_REPO}/releases/latest",
+        update_api_base()
+    );
+
+    let client = reqwest::Client::builder()
+        .timeout(UPDATE_TIMEOUT)
+        .build()
+        .map_err(|error| format!("创建更新检查客户端失败：{error}"))?;
+
+    let response = client
+        .get(&request_url)
+        .header(reqwest::header::USER_AGENT, format!("LingoNote/{current}"))
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|error| format!("连接更新服务失败：{error}"))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(update_check_error(status.as_u16()));
+    }
+
+    let value: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("解析更新信息失败：{error}"))?;
+
+    let tag_name = value
+        .get("tag_name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if tag_name.is_empty() {
+        return Err("更新信息缺少版本号".into());
+    }
+    let latest = normalize_version(tag_name);
+    if latest.is_empty() {
+        return Err("更新信息缺少版本号".into());
+    }
+
+    let raw_url = value
+        .get("html_url")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    // 契约要求 url 以 https://github.com/ 开头；上游字段异常时回落到仓库 Releases 页。
+    let url = if is_allowed_release_url(raw_url) {
+        raw_url.to_string()
+    } else {
+        format!("https://github.com/{UPDATE_REPO}/releases/latest")
+    };
+
+    let notes: String = value
+        .get("body")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .chars()
+        .take(UPDATE_NOTES_LIMIT)
+        .collect();
+    let published_at = value
+        .get("published_at")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let has_update = is_newer(&latest, &current);
+
+    logging::info(format!(
+        "update check: current={current} latest={latest} has_update={has_update}"
+    ));
+
+    Ok(UpdateInfo {
+        current,
+        latest,
+        has_update,
+        url,
+        notes,
+        published_at,
+    })
+}
+
+/// 在系统浏览器打开 Release 页；只接受 GitHub 链接，成功后写日志供验收取证。
+#[tauri::command]
+fn open_release_page(url: String) -> Result<(), String> {
+    let url = url.trim();
+    if !url.starts_with("https://github.com/") {
+        return Err("拒绝打开非 GitHub 链接".into());
+    }
+    if !is_allowed_release_url(url) {
+        return Err("链接包含非法字符".into());
+    }
+
+    let status = open_in_browser(url).map_err(|error| format!("打开浏览器失败：{error}"))?;
+    if !status.success() {
+        return Err(format!("打开浏览器失败（退出码 {status}）"));
+    }
+
+    logging::info(format!("open release page: {url}"));
+    Ok(())
 }
 
 // ---------- 热键 ----------
@@ -1442,7 +1627,9 @@ pub fn run() {
             show_note,
             hide_note,
             start_translation,
-            test_connection
+            test_connection,
+            check_update,
+            open_release_page
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -1451,6 +1638,10 @@ pub fn run() {
             logging::info(format!(
                 "LingoNote {} starting",
                 env!("CARGO_PKG_VERSION")
+            ));
+            logging::info(format!(
+                "update auto-check enabled: {}",
+                stored.behavior.check_updates
             ));
 
             register_initial_hotkey(&handle, &stored);

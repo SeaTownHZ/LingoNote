@@ -2,6 +2,8 @@ name: build
 
 on:
   push:
+    branches: ['**']
+    tags-ignore: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -21,6 +23,7 @@ jobs:
         with:
           name: LingoNote-windows
           path: src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
 
   macos:
     runs-on: macos-latest
@@ -40,3 +43,4 @@ jobs:
         with:
           name: LingoNote-macos-beta
           path: src-tauri/target/release/bundle/macos/LingoNote-macos.zip
+          if-no-files-found: error

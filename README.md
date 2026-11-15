@@ -10,7 +10,7 @@ LingoNote 是一个轻量的剪贴板翻译小工具：读取剪贴板文本，�
 
 ![LingoNote 设置页](docs/images/m2-settings.png)
 
-当前状态：**M2 Windows 主体完成（0.2.0）**。在 M1 基础上新增单实例、可编辑系统提示词、暂停热键、本地历史、配置导入/导出、滚动日志、配置原子写入与损坏备份、设置页五分区与自动保存。构建、16 个单元/集成测试、单实例与 v1→v2 配置迁移已验证；安装包与手动 UI 验收见 [`docs/M2-验证记录.md`](docs/M2-验证记录.md)。macOS 仍为 beta/未验证。
+当前状态：**M3 更新与发布闭环完成（0.3.0）**。在 M2（单实例、可编辑系统提示词、暂停热键、本地历史、配置导入/导出、滚动日志、配置原子写入与损坏备份、设置页五分区与自动保存）基础上，新增启动时自动检查更新与关于页手动检查更新（发现新版本可跳转 Release 页下载）、三处版本号归一，以及 `v*` tag 自动创建 Draft Release 的发布流水线；便签位置三模式、不透明度与位置记忆已并入本版本（M2.5 未单独发版）。构建与单元/集成测试已验证；安装包与手动 UI 验收见 [`docs/M2-验证记录.md`](docs/M2-验证记录.md)，版本变更见 [`CHANGELOG.md`](CHANGELOG.md)。macOS 仍为 beta/未验证。
 
 ## 已实现
 
@@ -45,6 +45,12 @@ LingoNote 是一个轻量的剪贴板翻译小工具：读取剪贴板文本，�
 - **行为增强**：最大字符数可调（1,000–100,000）；「出现时自动聚焦」开关；目标语言 9 种常用预设 + 自定义输入。
 - **关于页**：版本、应用标识、配置/历史/日志路径与隐私说明。
 
+### M3 新增（更新与发布）
+
+- **更新检查**：启动后自动检查 GitHub Releases 的最新版本（可在「通用 → 语言与行为」用「启动时检查更新」关闭）；关于页也可手动检查。
+- **结果提示**：发现新版本时状态行显示版本号与「下载」入口，点击打开系统浏览器到 Release 页；已是最新或检查失败都有中文状态行，不弹窗、不抢焦点。
+- **版本与发布**：三处版本号统一为 `0.3.0`，新增 [`CHANGELOG.md`](CHANGELOG.md)；推送 `v*` tag 自动构建 Windows/macOS 产物并创建 Draft Release。
+
 ## 开发环境
 
 - Node.js 20+（本机验证：24）。
@@ -78,6 +84,14 @@ npm run mock
 
 然后复制任意文本，按热键。
 
+mock 服务还提供更新检查用的端点：`GET /repos/SeaTownHZ/LingoNote/releases/latest`（GitHub Release 形状的 JSON，版本由环境变量 `MOCK_TAG` 指定，默认 `v0.3.1`）、别名 `GET /releases/latest`，以及 `GET /stats`（返回两个更新路径的请求总数 `updateRequests`）。两个路径返回内容相同、都计数；本地烟测时把更新 API 指到本机即可：
+
+```powershell
+$env:LINGONOTE_UPDATE_API = 'http://127.0.0.1:8765'
+```
+
+应用会请求 `{api_base}/repos/SeaTownHZ/LingoNote/releases/latest`，因此烟测请使用完整 GitHub 路径。
+
 ## 构建安装包
 
 ```powershell
@@ -87,7 +101,14 @@ npm run tauri build
 产物：
 
 - `src-tauri/target/release/lingonote.exe`
-- `src-tauri/target/release/bundle/nsis/LingoNote_0.2.0_x64-setup.exe`
+- `src-tauri/target/release/bundle/nsis/LingoNote_0.3.0_x64-setup.exe`
+
+## 更新与发布
+
+- **检查更新**：设置页「关于」有「检查更新」按钮；启动后也会自动检查一次（可用「启动时检查更新」关闭）。检查只读取 GitHub Releases 的最新 `tag_name`，不下载、不上传任何数据。
+- **下载**：发现新版本时点「下载」会由系统浏览器打开对应的 Release 页面，安装包由你自行下载安装。
+- **发版流程**：推送 `v*` tag（如 `v0.3.0`）触发 `.github/workflows/release.yml`，构建 Windows NSIS 安装包与 macOS 压缩包，并以 **Draft Release** 形式创建在对应 tag 下，人工确认说明后再手动发布；普通推送与 PR 只跑 `build.yml` 构建校验。
+- **变更记录**：见 [`CHANGELOG.md`](CHANGELOG.md)。
 
 ## 测试
 
@@ -96,7 +117,7 @@ cd src-tauri
 cargo test
 ```
 
-当前覆盖：URL 规范化、HTTP 错误映射、默认/自定义提示词、M0 配置兼容、schema 归一化、API Key 不落盘、导出不含 Key、导入校验、历史上限、原子写入、日志级别/单行化、最大字符数、热键格式解析，共 **16 个** 通过（14 个纯逻辑 + 2 个热键）。
+当前覆盖：URL 规范化、HTTP 错误映射、默认/自定义提示词、M0 配置兼容、schema 归一化、API Key 不落盘、导出不含 Key、导入校验、历史上限、原子写入、日志级别/单行化、最大字符数、热键格式解析，以及 M3 的版本归一/比较（`normalize_version`、`is_newer`），全部通过。
 
 > Windows GNU 工具链下，库测试二进制会因 WebView2Loader 入口点问题无法启动，所以 `[lib] test = false`，测试放在 `src-tauri/tests/` 的纯逻辑目标中。
 
@@ -114,7 +135,9 @@ node scripts/cdp.mjs screenshot docs/images/ui.png
 
 该端口只用于本机调试，验证完成后关闭应用即可；不要把带调试端口的进程用于日常使用。
 
-## M2 手动验收
+## 手动验收（M2 清单）
+
+M3 的运行时验收见 `docs/M3-验证记录.md`。
 
 1. 设置页可在「通用 / 翻译服务 / 外观 / 高级 / 关于」之间切换；改外观或行为后无需点保存，重启后仍生效。
 2. 应用已运行时再次双击 exe：不出现第二个托盘图标，已有设置窗口被唤起。
@@ -130,10 +153,10 @@ node scripts/cdp.mjs screenshot docs/images/ui.png
 ## 已知限制
 
 - 历史以 `history.json` 保存（需求原写 SQLite `history.db`）；200 条规模无需引入数据库，文件为明文，默认关闭。
-- 未实现窗口透明度、位置记忆/固定锚点、自动更新、划词/OCR（对应需求 P2/P1 未完成项）。
+- 未实现应用内自动更新（只检查并跳转 Release 页手动下载）、划词/OCR（对应需求 P2/P1 未完成项）。
 - 热键录制仍是文本输入 + 应用按钮，不是按键捕获控件；格式需手写（如 `Alt+Q`、`Ctrl+Shift+T`）。
 - 日志目录使用 Tauri 的 app log dir（`%LOCALAPPDATA%\com.lingonote.desktop\logs`），不是需求草案里的 `%LOCALAPPDATA%\LingoNote`。
-- macOS 尚未在真机验证；CI 工作流见 `.github/workflows/build.yml`。
+- macOS 尚未在真机验证；CI 工作流见 `.github/workflows/build.yml`（构建校验）与 `.github/workflows/release.yml`（tag 发版）。
 - 便签高度固定 360px；长文本内部滚动。
 - 开机自启在开发模式下会注册 dev exe，正式使用请装安装版；安装版的自启指向安装目录下的 exe。
 - GNU 链接警告 `multiple non-default manifests` 仍在，不影响启动。
@@ -149,11 +172,12 @@ node scripts/cdp.mjs screenshot docs/images/ui.png
 ## 目录
 
 ```
-docs/                M0/M1/M2 验证记录与界面截图
+docs/                M0/M1/M2/M3 验证记录与界面截图
 design/              LingoNote 图标与生成脚本
 src/                 便签 + 设置前端
 src-tauri/           Tauri/Rust 后端
 scripts/             mock SSE 服务
+CHANGELOG.md         更新日志
 ```
 
 ## 许可

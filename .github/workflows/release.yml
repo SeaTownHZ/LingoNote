@@ -1,0 +1,67 @@
+name: release
+
+# 仅 v* tag 触发：构建 Windows 安装包与 macOS 包并创建 Draft Release。
+# 不支持手动触发，避免没有 tag 时 action 拿不到有效 tag 而失败。
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - run: npx tauri build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LingoNote-windows
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - run: npx tauri build --bundles app
+      - name: Package macOS app
+        run: |
+          cd src-tauri/target/release/bundle/macos
+          ditto -c -k --sequesterRsrc --keepParent LingoNote.app LingoNote-macos.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LingoNote-macos
+          path: src-tauri/target/release/bundle/macos/LingoNote-macos.zip
+          if-no-files-found: error
+
+  draft-release:
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: LingoNote ${{ github.ref_name }}
+          draft: true
+          generate_release_notes: false
+          fail_on_unmatched_files: true
+          files: |
+            artifacts/LingoNote-windows/*.exe
+            artifacts/LingoNote-macos/LingoNote-macos.zip

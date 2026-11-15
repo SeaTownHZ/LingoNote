@@ -813,6 +813,54 @@ button:disabled {
   text-align: right;
 }
 
+/* ---------- 版本更新 ---------- */
+
+.update-block {
+  padding: 10px 0 12px;
+  border-top: 1px solid #f1f4f3;
+}
+
+.update-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.update-label {
+  color: #43524f;
+  font-size: 13px;
+}
+
+.update-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.update-actions .secondary-btn {
+  height: 30px;
+  padding: 0 12px;
+}
+
+.update-status {
+  margin: 8px 0 0;
+  color: #5d6d6a;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.update-status.ok {
+  color: #1f7a5c;
+}
+
+.update-status.err {
+  color: #b42318;
+}
+
 @media (max-width: 760px) {
   .settings-side {
     flex-basis: 172px;

@@ -42,6 +42,8 @@ interface BehaviorConfig {
   appear_focused: boolean;
   pause_hotkey: boolean;
   max_chars: number;
+  /** 启动时检查更新；旧配置缺该字段时后端按 true 返回。 */
+  check_updates: boolean;
 }
 
 interface HistoryConfig {
@@ -110,6 +112,15 @@ interface AppInfo {
   hotkey_paused: boolean;
 }
 
+interface UpdateInfo {
+  current: string;
+  latest: string;
+  has_update: boolean;
+  url: string;
+  notes: string;
+  published_at: string;
+}
+
 const el = <T extends HTMLElement = HTMLElement>(id: string): T => {
   const node = document.getElementById(id);
   if (!node) throw new Error(`missing element #${id}`);
@@ -125,6 +136,7 @@ const targetLanguage = el<HTMLInputElement>("target-language");
 const hideOnBlur = el<HTMLInputElement>("hide-on-blur");
 const appearFocused = el<HTMLInputElement>("appear-focused");
 const copyRestores = el<HTMLInputElement>("copy-restores");
+const checkUpdatesToggle = el<HTMLInputElement>("check-updates");
 const positionMode = el<HTMLSelectElement>("position-mode");
 const anchor = el<HTMLSelectElement>("anchor");
 const marginX = el<HTMLInputElement>("margin-x");
@@ -179,6 +191,9 @@ const aboutIdentifier = el<HTMLElement>("about-identifier");
 const aboutConfigPath = el<HTMLElement>("about-config-path");
 const aboutHistoryPath = el<HTMLElement>("about-history-path");
 const aboutLogPath = el<HTMLElement>("about-log-path");
+const updateStatus = el<HTMLParagraphElement>("update-status");
+const checkUpdateBtn = el<HTMLButtonElement>("check-update");
+const updateDownloadBtn = el<HTMLButtonElement>("update-download");
 const pageTitle = el<HTMLElement>("page-title");
 const pageDesc = el<HTMLElement>("page-desc");
 const saveHint = el<HTMLSpanElement>("save-hint");
@@ -250,6 +265,8 @@ let appInfo: AppInfo | null = null;
 let saveTimer: number | null = null;
 let saveChain: Promise<boolean> = Promise.resolve(true);
 let suppressAutosave = false;
+let latestUpdate: UpdateInfo | null = null;
+let updateRequestSeq = 0;
 
 const POSITION_MODES: PositionMode[] = ["cursor", "anchor", "remember"];
 const ANCHORS: Anchor[] = [
@@ -371,6 +388,7 @@ function collect(): ConfigInput {
       appear_focused: appearFocused.checked,
       pause_hotkey: pauseHotkey.checked,
       max_chars: clampInt(maxChars, 20_000, 1_000, 100_000),
+      check_updates: checkUpdatesToggle.checked,
     },
     window: {
       position_mode: normalizePositionMode(positionMode.value),
@@ -492,6 +510,7 @@ function fillConfig(config: ConfigView, status: HotkeyStatus) {
     appearFocused.checked = config.behavior.appear_focused;
     pauseHotkey.checked = status.paused;
     maxChars.value = String(config.behavior.max_chars || 20_000);
+    checkUpdatesToggle.checked = config.behavior.check_updates !== false;
 
     historyEnabled.checked = config.history.enabled;
     loggingEnabled.checked = config.logging.enabled;
@@ -661,6 +680,73 @@ function fillAppInfo(info: AppInfo) {
   logPath.textContent = info.log_dir;
 }
 
+// ---------- 更新检查 ----------
+
+const AUTO_UPDATE_CHECK_DELAY = 3000;
+
+function setUpdateDownloadVisible(visible: boolean) {
+  updateDownloadBtn.classList.toggle("hidden", !visible);
+}
+
+/**
+ * 检查更新：结果只写关于页状态行，不弹窗、不抢焦点。
+ * manual=false 为启动自动检查，失败时给静默文案。
+ */
+async function checkUpdate(manual: boolean): Promise<void> {
+  const requestId = ++updateRequestSeq;
+  latestUpdate = null;
+  setUpdateDownloadVisible(false);
+  checkUpdateBtn.disabled = true;
+  setResult(updateStatus, "检查中…", "");
+  try {
+    const info = await invoke<UpdateInfo>("check_update");
+    if (requestId !== updateRequestSeq) return;
+    latestUpdate = info;
+    if (info.has_update) {
+      setResult(updateStatus, `发现新版本 v${info.latest}`, "ok");
+      setUpdateDownloadVisible(true);
+    } else {
+      const current = info.current || appInfo?.version || "—";
+      setResult(updateStatus, `已是最新版本 ${current}`, "");
+      setUpdateDownloadVisible(false);
+    }
+  } catch (error) {
+    if (requestId !== updateRequestSeq) return;
+    latestUpdate = null;
+    setUpdateDownloadVisible(false);
+    if (manual) {
+      setResult(updateStatus, `检查失败：${String(error)}`, "err");
+    } else {
+      setResult(updateStatus, "检查更新失败（可手动重试）", "err");
+    }
+  } finally {
+    if (requestId === updateRequestSeq) checkUpdateBtn.disabled = false;
+  }
+}
+
+async function openReleasePage() {
+  const info = latestUpdate;
+  if (!info) {
+    setResult(updateStatus, "没有可用的下载地址，请重新检查更新", "err");
+    return;
+  }
+  updateDownloadBtn.disabled = true;
+  try {
+    await invoke("open_release_page", { url: info.url });
+    setResult(updateStatus, `发现新版本 v${info.latest} · 已在浏览器打开发布页`, "ok");
+  } catch (error) {
+    setResult(updateStatus, `打开下载页失败：${String(error)}`, "err");
+  } finally {
+    updateDownloadBtn.disabled = false;
+  }
+}
+
+function scheduleAutoUpdateCheck() {
+  window.setTimeout(() => {
+    if (checkUpdatesToggle.checked) void checkUpdate(false);
+  }, AUTO_UPDATE_CHECK_DELAY);
+}
+
 async function saveApiKey() {
   const value = apiKey.value.trim();
   if (!value) {
@@ -687,6 +773,8 @@ async function load() {
   ]);
   fillConfig(config, status);
   fillAppInfo(info);
+  // 页面初始化（配置已渲染）3 秒后按开关决定是否自动检查；失败静默。
+  scheduleAutoUpdateCheck();
 
   try {
     autostart.checked = await invoke<boolean>("get_autostart");
@@ -756,7 +844,7 @@ for (const input of [baseUrl, model, targetLanguage, maxChars, promptArea]) {
   });
 }
 
-for (const input of [hideOnBlur, appearFocused, copyRestores, loggingEnabled]) {
+for (const input of [hideOnBlur, appearFocused, copyRestores, checkUpdatesToggle, loggingEnabled]) {
   input.addEventListener("change", () => scheduleSave());
 }
 
@@ -948,6 +1036,9 @@ dismissWarningBtn.addEventListener("click", () => {
   showWarning(null);
   void invoke("dismiss_config_warning");
 });
+
+checkUpdateBtn.addEventListener("click", () => void checkUpdate(true));
+updateDownloadBtn.addEventListener("click", () => void openReleasePage());
 
 closeBtn.addEventListener("click", () => void invoke("close_settings"));
 quitBtn.addEventListener("click", () => void invoke("quit_app"));

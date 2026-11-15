@@ -1,8 +1,28 @@
 import http from "node:http";
 
 const PORT = Number(process.env.PORT ?? 8765);
+const MOCK_TAG = process.env.MOCK_TAG ?? "v0.3.1";
+const RELEASE_URL_BASE = "https://github.com/SeaTownHZ/LingoNote/releases/tag";
 const TEXT = "这是 LingoNote 的模拟翻译。\n第二行用于测试换行，以及流式输出。";
 const CHUNKS = ["这是 ", "LingoNote ", "的模拟翻译。\n", "第二行用于测试换行，", "以及流式输出。"];
+
+// 更新检查冒烟用：GitHub 完整路径与 /releases/latest 别名都计数 +1，供 /stats 读取。
+let updateRequests = 0;
+
+// GitHub Releases "latest" 形状；两个路径返回完全相同的 JSON。
+const UPDATE_PATHS = new Set([
+  "/repos/SeaTownHZ/LingoNote/releases/latest",
+  "/releases/latest",
+]);
+
+function releaseInfo() {
+  return {
+    tag_name: MOCK_TAG,
+    html_url: `${RELEASE_URL_BASE}/${MOCK_TAG}`,
+    body: `模拟更新说明：${MOCK_TAG} 已发布，包含更新检查与发布流水线。`,
+    published_at: "2026-11-15T00:00:00Z",
+  };
+}
 
 function json(res, status, value) {
   const body = JSON.stringify(value);
@@ -17,6 +37,17 @@ function json(res, status, value) {
 const server = http.createServer((req, res) => {
   if (req.method === "GET" && req.url === "/health") {
     json(res, 200, { ok: true, service: "lingonote-mock" });
+    return;
+  }
+
+  if (req.method === "GET" && UPDATE_PATHS.has(req.url)) {
+    updateRequests += 1;
+    json(res, 200, releaseInfo());
+    return;
+  }
+
+  if (req.method === "GET" && req.url === "/stats") {
+    json(res, 200, { ok: true, updateRequests });
     return;
   }
 
@@ -83,4 +114,6 @@ server.listen(PORT, "127.0.0.1", () => {
   console.log("Base URL: http://127.0.0.1:8765/v1");
   console.log("API Key: mock");
   console.log("Model: mock");
+  console.log(`Mock release: http://127.0.0.1:${PORT}/releases/latest (tag ${MOCK_TAG})`);
+  console.log(`Mock stats: http://127.0.0.1:${PORT}/stats`);
 });

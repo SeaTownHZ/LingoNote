@@ -448,3 +448,167 @@ fn config_json_contract_matches_spec_section_3() {
     assert_eq!(value["window"]["last_x"], Value::Null);
     assert_eq!(value["window"]["last_y"], Value::Null);
 }
+
+// ---------- M3：版本归一化与比较（SPEC 3.3） ----------
+
+#[test]
+fn version_normalization_strips_prefix_and_whitespace() {
+    assert_eq!(normalize_version(" v0.3.1 "), "0.3.1");
+    assert_eq!(normalize_version("V0.10.0"), "0.10.0");
+    assert_eq!(normalize_version("0.3.0"), "0.3.0");
+    assert_eq!(normalize_version("\t0.3.0\n"), "0.3.0");
+    assert_eq!(normalize_version(""), "");
+    assert_eq!(normalize_version("   "), "");
+}
+
+#[test]
+fn is_newer_compares_three_segments() {
+    assert!(is_newer("v0.3.1", "0.3.0"));
+    assert!(is_newer("0.3.1", "v0.3.0"));
+    assert!(!is_newer("0.3.0", "0.3.1"));
+    assert!(is_newer("1.0.0", "0.9.9"));
+    assert!(!is_newer("0.9.9", "1.0.0"));
+}
+
+#[test]
+fn is_newer_pads_missing_segments_with_zero() {
+    // `0.3` 与 `0.3.0` 相等，两个方向都不算更新。
+    assert!(!is_newer("0.3", "0.3.0"));
+    assert!(!is_newer("0.3.0", "0.3"));
+    assert!(is_newer("0.3.1", "0.3"));
+    assert!(is_newer("0.4", "0.3.9"));
+}
+
+#[test]
+fn is_newer_treats_prerelease_as_older_than_release() {
+    assert!(!is_newer("0.3.0-rc1", "0.3.0"));
+    assert!(is_newer("0.3.0", "0.3.0-rc1"));
+    // 主版本更高时，预发布版仍然更新。
+    assert!(is_newer("0.3.1-rc1", "0.3.0"));
+    assert!(!is_newer("0.2.9-rc1", "0.3.0"));
+    // 两个预发布版之间的先后未定义，保守不提示升级。
+    assert!(!is_newer("0.3.0-rc2", "0.3.0-rc1"));
+}
+
+#[test]
+fn is_newer_accepts_uppercase_prefix_and_multi_digit_segments() {
+    assert!(is_newer("V0.10.0", "0.9.9"));
+    assert!(is_newer("v0.10.0", "V0.9.9"));
+    assert!(!is_newer("V0.10.0", "0.10.0"));
+}
+
+#[test]
+fn is_newer_returns_false_for_equal_versions() {
+    assert!(!is_newer("0.3.0", "0.3.0"));
+    assert!(!is_newer("v0.3.0", "0.3.0"));
+    assert!(!is_newer("0.3", "0.3.0"));
+}
+
+#[test]
+fn is_newer_returns_false_for_invalid_input() {
+    assert!(!is_newer("", "0.3.0"));
+    assert!(!is_newer("0.3.0", ""));
+    assert!(!is_newer("latest", "0.3.0"));
+    assert!(!is_newer("0.3.0", "latest"));
+    assert!(!is_newer("0.3.x", "0.3.0"));
+    assert!(!is_newer("0.3..1", "0.3.0"));
+    assert!(!is_newer("v", "0.3.0"));
+    assert!(!is_newer("0.3.0-", "0.3.0"));
+    assert!(!is_newer("1.2.3.4.5.6", "not-a-version"));
+}
+
+#[test]
+fn is_newer_compares_four_segment_versions() {
+    assert!(is_newer("0.3.0.1", "0.3.0"));
+    assert!(!is_newer("0.3.0", "0.3.0.1"));
+    assert!(!is_newer("0.3.0.0", "0.3.0"));
+    assert!(is_newer("0.3.1.0", "0.3.0.9"));
+}
+
+// ---------- M3：check_updates 配置字段（SPEC 3.1） ----------
+
+#[test]
+fn check_updates_defaults_to_true_for_new_and_legacy_configs() {
+    assert!(StoredConfig::default().behavior.check_updates);
+    assert_eq!(SCHEMA_VERSION, 2);
+
+    // 旧配置整体缺少 behavior 段。
+    let legacy: StoredConfig = serde_json::from_str(
+        r#"{"schema_version": 2, "base_url": "https://api.deepseek.com/v1", "model": "deepseek-chat"}"#,
+    )
+    .unwrap();
+    assert!(legacy.behavior.check_updates);
+
+    // behavior 段存在但缺少 check_updates。
+    let partial: StoredConfig =
+        serde_json::from_str(r#"{"behavior": {"hide_on_blur": false}}"#).unwrap();
+    assert!(partial.behavior.check_updates);
+    assert!(!partial.behavior.hide_on_blur);
+
+    // 设置页旧版 ConfigInput 不发送该字段时同样取 true。
+    let input: ConfigInput = serde_json::from_str(
+        r#"{
+            "base_url": "https://api.deepseek.com/v1",
+            "model": "deepseek-chat",
+            "target_language": "简体中文",
+            "ui": {},
+            "behavior": {}
+        }"#,
+    )
+    .unwrap();
+    assert!(input.behavior.check_updates);
+
+    // 导入旧配置（无 behavior 段）也取 true。
+    let imported = parse_import(
+        r#"{"schema_version": 2, "base_url": "https://api.deepseek.com/v1", "model": "deepseek-chat"}"#,
+    )
+    .unwrap();
+    assert!(imported.behavior.check_updates);
+}
+
+#[test]
+fn check_updates_false_survives_normalize_export_and_import() {
+    let mut config = StoredConfig::default();
+    config.behavior.check_updates = false;
+
+    let normalized = normalize_config(config.clone());
+    assert!(!normalized.behavior.check_updates);
+    assert_eq!(normalized.schema_version, 2);
+
+    let exported = build_export(&normalized, "2026-11-15T18:00:00+08:00");
+    assert_eq!(exported["behavior"]["check_updates"], Value::from(false));
+    assert_eq!(exported["schema_version"], Value::from(2));
+
+    let imported = parse_import(&exported.to_string()).unwrap();
+    assert!(!imported.behavior.check_updates);
+    assert_eq!(imported.schema_version, 2);
+
+    // 关闭后不会被归一化强行改回 true。
+    assert!(!normalize_config(imported).behavior.check_updates);
+}
+
+#[test]
+fn config_view_serializes_check_updates() {
+    let mut behavior = BehaviorConfig::default();
+    behavior.check_updates = false;
+
+    let view = ConfigView {
+        schema_version: SCHEMA_VERSION,
+        base_url: "https://api.deepseek.com/v1".into(),
+        model: "deepseek-chat".into(),
+        target_language: "简体中文".into(),
+        hotkey: "Alt+Q".into(),
+        ui: UiConfig::default(),
+        window: WindowConfig::default(),
+        behavior,
+        prompt: String::new(),
+        default_prompt: DEFAULT_PROMPT.to_string(),
+        history: HistoryConfig::default(),
+        logging: LoggingConfig::default(),
+        has_api_key: false,
+        warning: None,
+    };
+    let value = serde_json::to_value(&view).unwrap();
+    assert_eq!(value["behavior"]["check_updates"], Value::from(false));
+    assert_eq!(value["behavior"]["hide_on_blur"], Value::from(true));
+}

@@ -92,6 +92,10 @@
               <input id="copy-restores" type="checkbox" />
               <span>复制译文 1 秒后恢复原剪贴板</span>
             </label>
+            <label class="check-row">
+              <input id="check-updates" type="checkbox" />
+              <span>启动时检查更新</span>
+            </label>
           </section>
 
           <section class="settings-card">
@@ -326,8 +330,18 @@
             <p class="hint">复制文本，按热键，在光标旁看译文。无账号、无广告、无遥测。</p>
             <p class="kv"><span>版本</span><code id="about-version">—</code></p>
             <p class="kv"><span>应用标识</span><code id="about-identifier">—</code></p>
+            <div class="update-block">
+              <div class="update-head">
+                <span class="update-label">版本更新</span>
+                <div class="update-actions">
+                  <button id="check-update" class="secondary-btn" type="button">检查更新</button>
+                  <button id="update-download" class="secondary-btn hidden" type="button">下载</button>
+                </div>
+              </div>
+              <p id="update-status" class="update-status" role="status">—</p>
+            </div>
             <p class="kv"><span>许可证</span><code>MIT</code></p>
-            <p class="kv"><span>开源地址</span><code>待发布</code></p>
+            <p class="kv"><span>开源地址</span><code>github.com/SeaTownHZ/LingoNote</code></p>
             <p class="kv"><span>配置文件</span><code id="about-config-path">—</code></p>
             <p class="kv"><span>历史文件</span><code id="about-history-path">—</code></p>
             <p class="kv"><span>日志目录</span><code id="about-log-path">—</code></p>

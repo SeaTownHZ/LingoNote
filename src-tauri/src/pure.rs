@@ -107,6 +107,14 @@ pub struct BehaviorConfig {
     /// 暂停全局热键；暂停后托盘菜单仍可翻译。
     pub pause_hotkey: bool,
     pub max_chars: u32,
+    /// 启动时自动检查更新；旧配置缺省为 true（SPEC 3.1）。
+    #[serde(default = "default_true")]
+    pub check_updates: bool,
+}
+
+/// 布尔字段缺省值：更新检查默认开启。
+fn default_true() -> bool {
+    true
 }
 
 impl Default for BehaviorConfig {
@@ -117,6 +125,7 @@ impl Default for BehaviorConfig {
             appear_focused: false,
             pause_hotkey: false,
             max_chars: DEFAULT_MAX_CHARS,
+            check_updates: true,
         }
     }
 }
@@ -258,6 +267,90 @@ pub struct HistoryEntry {
     pub target_language: String,
     pub model: String,
     pub duration_ms: u64,
+}
+
+// ---------- 版本比较（更新检查，SPEC 3.3） ----------
+
+/// 版本号归一化：去掉首尾空白与单个 `v`/`V` 前缀（` v0.3.1 ` → `0.3.1`）。
+pub fn normalize_version(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let without_prefix = trimmed
+        .strip_prefix('v')
+        .or_else(|| trimmed.strip_prefix('V'))
+        .unwrap_or(trimmed);
+    without_prefix.trim().to_string()
+}
+
+struct ParsedVersion {
+    segments: Vec<u64>,
+    prerelease: Option<String>,
+}
+
+/// 解析 `MAJOR.MINOR.PATCH[-PRE]`；空串、非数字段、空预发布标识都视为非法。
+fn parse_version(raw: &str) -> Option<ParsedVersion> {
+    let normalized = normalize_version(raw);
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let (main, prerelease) = match normalized.split_once('-') {
+        Some((main, pre)) => {
+            let pre = pre.trim();
+            if pre.is_empty() {
+                return None;
+            }
+            (main, Some(pre.to_string()))
+        }
+        None => (normalized.as_str(), None),
+    };
+
+    if main.is_empty() {
+        return None;
+    }
+
+    let mut segments = Vec::new();
+    for segment in main.split('.') {
+        if segment.is_empty() || !segment.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        segments.push(segment.parse::<u64>().ok()?);
+    }
+    if segments.is_empty() {
+        return None;
+    }
+
+    Some(ParsedVersion {
+        segments,
+        prerelease,
+    })
+}
+
+/// 判断 `latest` 是否比 `current` 新（SPEC 3.3）。
+///
+/// - 按 `.` 切数字段逐段比较，缺失段补 0（`0.3` 等同于 `0.3.0`）；
+/// - 主版本相同时，含 `-` 的预发布版低于正式版；两个预发布版之间不提示升级；
+/// - 相等、空串或非数字段等非法输入返回 `false`，不 panic。
+pub fn is_newer(latest: &str, current: &str) -> bool {
+    let Some(latest) = parse_version(latest) else {
+        return false;
+    };
+    let Some(current) = parse_version(current) else {
+        return false;
+    };
+
+    let len = latest.segments.len().max(current.segments.len());
+    for index in 0..len {
+        let lhs = latest.segments.get(index).copied().unwrap_or(0);
+        let rhs = current.segments.get(index).copied().unwrap_or(0);
+        if lhs != rhs {
+            return lhs > rhs;
+        }
+    }
+
+    matches!(
+        (latest.prerelease.is_some(), current.prerelease.is_some()),
+        (false, true)
+    )
 }
 
 pub fn normalize_url(base: &str) -> String {
