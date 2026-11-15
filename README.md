@@ -1,8 +1,13 @@
 # LingoNote（语签）
 
+[![build](https://github.com/SeaTownHZ/lingonote/actions/workflows/build.yml/badge.svg)](https://github.com/SeaTownHZ/lingonote/actions/workflows/build.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
 复制文本，按 `Alt+Q`，在光标旁看译文。
 
 LingoNote 是一个轻量的剪贴板翻译小工具：读取剪贴板文本，调用你自己配置的 OpenAI 兼容大模型接口，用一张可自定义的便签显示流式译文。无账号、无广告、无遥测。
+
+![LingoNote 设置页](docs/images/m2-settings.png)
 
 当前状态：**M2 Windows 主体完成（0.2.0）**。在 M1 基础上新增单实例、可编辑系统提示词、暂停热键、本地历史、配置导入/导出、滚动日志、配置原子写入与损坏备份、设置页五分区与自动保存。构建、16 个单元/集成测试、单实例与 v1→v2 配置迁移已验证；安装包与手动 UI 验收见 [`docs/M2-验证记录.md`](docs/M2-验证记录.md)。macOS 仍为 beta/未验证。
 
@@ -129,7 +134,7 @@ node scripts/cdp.mjs screenshot docs/images/ui.png
 - 日志目录使用 Tauri 的 app log dir（`%LOCALAPPDATA%\com.lingonote.desktop\logs`），不是需求草案里的 `%LOCALAPPDATA%\LingoNote`。
 - macOS 尚未在真机验证；CI 工作流见 `.github/workflows/build.yml`。
 - 便签高度固定 360px；长文本内部滚动。
-- 开机自启在开发模式下会注册 dev exe，正式测试请用安装版；当前已安装到 `C:\Users\seatown\AppData\Local\Programs\LingoNote`，自启指向该目录。旧测试安装 `D:\ClipTonge\.tools\install-test\` 可手动删除。
+- 开机自启在开发模式下会注册 dev exe，正式使用请装安装版；安装版的自启指向安装目录下的 exe。
 - GNU 链接警告 `multiple non-default manifests` 仍在，不影响启动。
 
 ## 数据位置
@@ -143,7 +148,7 @@ node scripts/cdp.mjs screenshot docs/images/ui.png
 ## 目录
 
 ```
-docs/                需求文档 v0.3、M0/M1/M2 验证记录
+docs/                M0/M1/M2 验证记录与界面截图
 design/              LingoNote 图标与生成脚本
 src/                 便签 + 设置前端
 src-tauri/           Tauri/Rust 后端

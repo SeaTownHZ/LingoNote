@@ -1,8 +1,8 @@
 from PIL import Image
 import os
 
-src = Image.open(r"D:\ClipTonge\design\lingonote-1024.png")
-out = r"D:\ClipTonge\src-tauri\icons"
+src = Image.open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "lingonote-1024.png"))
+out = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src-tauri", "icons"))
 os.makedirs(out, exist_ok=True)
 
 for size, name in [

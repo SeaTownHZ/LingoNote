@@ -1,7 +1,7 @@
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 import os
 
-OUT = r"D:\ClipTonge\design"
+OUT = os.path.dirname(os.path.abspath(__file__))
 os.makedirs(OUT, exist_ok=True)
 
 S = 2048
