@@ -1,6 +1,7 @@
 # LingoNote（语签）
 
 [![build](https://github.com/SeaTownHZ/lingonote/actions/workflows/build.yml/badge.svg)](https://github.com/SeaTownHZ/lingonote/actions/workflows/build.yml)
+[![release](https://img.shields.io/github/v/release/SeaTownHZ/LingoNote.svg)](https://github.com/SeaTownHZ/LingoNote/releases)
 [![license: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 复制文本，按 `Alt+Q`，在光标旁看译文。
