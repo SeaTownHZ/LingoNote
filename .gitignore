@@ -7,3 +7,5 @@ src-tauri/gen/
 .dsh-meow/
 *.log
 npm-debug.log*
+project/
+docs/需求文档-*.md
