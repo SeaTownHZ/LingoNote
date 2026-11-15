@@ -1,0 +1,90 @@
+{
+  "project": "cliptonge-m2.5",
+  "spec": "project/SPEC.md",
+  "plan": "project/PLAN.md",
+  "status": "done",
+  "result": "PASS",
+  "completedAt": "2026-11-15T14:48:00+08:00",
+  "definitionOfDone": [
+    "npm run build 通过",
+    "cd src-tauri && cargo test --release --offline 全绿（>=20 测试）",
+    "npm run tauri build -- --no-bundle 通过（生产构建）",
+    "T3 评审 P0/P1 清零",
+    "T4 验收 AC-M25-1..10 全过",
+    "git 里程碑提交"
+  ],
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Rust 后端：位置三模式 + 不透明度字段 + 记住位置落盘",
+      "role": "implementer",
+      "owner": "rust-backend",
+      "depends_on": [],
+      "write_scope": [
+        "src-tauri/src/pure.rs",
+        "src-tauri/src/lib.rs",
+        "src-tauri/tests/pure.rs"
+      ],
+      "acceptance": [
+        "pure.rs 增加 WorkArea、cursor_position、anchor_position、clamp_position 纯函数并单测覆盖翻转/九宫格/越界",
+        "UiConfig 增加 opacity(u32,80-100)，WindowConfig 增加 position_mode/anchor/margin_x/margin_y/last_x/last_y，normalize_config 钳制",
+        "StoredConfig/ConfigView/ConfigInput 带 window；ConfigInput.window 用 serde(default)；save_config 保留旧 last_x/last_y",
+        "show_note 按 position_mode 计算坐标（cursor/anchor/remember），remember 越界夹回",
+        "note 窗口 Moved 事件去抖 ~600ms 保存 last_x/last_y（仅 remember 模式，不 emit config-changed）",
+        "cargo test --release --offline 全绿 >=20；生产构建通过"
+      ],
+      "status": "done"
+    },
+    {
+      "id": "T2",
+      "title": "前端：设置页位置与不透明度控件 + 便签应用透明度",
+      "role": "implementer",
+      "owner": "frontend",
+      "depends_on": [],
+      "write_scope": [
+        "src/main.ts",
+        "src/settings.ts",
+        "src/styles.css",
+        "settings.html"
+      ],
+      "acceptance": [
+        "main.ts 的 UiConfig 增加 opacity，applyUi 设置 --note-opacity=opacity/100（钳制 80-100）",
+        "styles.css 让 .note-shell 使用 var(--note-opacity,1)，不影响阴影/圆角",
+        "settings.html 通用区加 position-mode/anchor/margin-x/margin-y；外观区加 opacity 滑杆 + 百分数显示",
+        "settings.ts 类型与 SPEC 契约一致，保存 payload 带 ui.opacity 与 window 字段",
+        "非 anchor 模式禁用锚点/边距；remember 模式显示提示；applyTheme/恢复默认把 opacity 置 100",
+        "设置预览随不透明度变化；npm run build 通过"
+      ],
+      "status": "done"
+    },
+    {
+      "id": "T3",
+      "title": "独立评审：对照 SPEC 复审 T1+T2 的 diff",
+      "role": "reviewer",
+      "owner": "reviewer2",
+      "depends_on": ["T1", "T2"],
+      "write_scope": ["project/REVIEW.md"],
+      "acceptance": [
+        "逐条核对 SPEC 第 3/4 节契约与 AC-M25-1..10",
+        "按 Severity 列问题（P0 阻断 / P1 必修 / P2 建议），每条给文件:行",
+        "结论只有 PASS / FAIL；FAIL 必须列出阻断项"
+      ],
+      "status": "done"
+    },
+    {
+      "id": "T4",
+      "title": "验收：静态闸 + 运行时烟测 + ACCEPT 报告",
+      "role": "acceptor",
+      "owner": "lead",
+      "depends_on": ["T3"],
+      "write_scope": ["project/ACCEPT.md", "project/STATUS.md"],
+      "acceptance": [
+        "project/accept.ps1 全绿（build + test + 生产构建）",
+        "CDP 烟测：设置页五个分区可切换、新增控件存在、config.json 落盘字段正确",
+        "便签运行时：opacity 生效、anchor/remember 位置符合预期",
+        "AC-M25-1..10 逐条打勾，证据入 ACCEPT.md"
+      ],
+      "status": "done"
+    }
+  ]
+}

@@ -27,6 +27,7 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  opacity: var(--note-opacity, 1);
   background: var(--note-bg, #ffffff);
   border: 1px solid rgba(0, 0, 0, 0.06);
   border-radius: var(--note-radius, 12px);
@@ -511,6 +512,53 @@ input[type="color"] {
   font-size: 16px;
   line-height: 1.65;
   white-space: pre-wrap;
+  opacity: var(--note-opacity, 1);
+}
+
+/* 不透明度滑杆：覆盖 .field input 的通用输入框样式 */
+.range-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.field input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  accent-color: #2f9e8f;
+  cursor: pointer;
+}
+
+.field input[type="range"]:focus {
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.range-value {
+  flex: 0 0 auto;
+  min-width: 46px;
+  color: #43524f;
+  font-family: "Consolas", monospace;
+  font-size: 12px;
+  text-align: right;
+}
+
+/* 非 anchor 模式下的锚点/边距输入 */
+.field input:disabled,
+.field select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  background: #f2f4f3;
+}
+
+.position-hint {
+  margin-bottom: 0;
 }
 
 /* ---------- 按钮 ---------- */

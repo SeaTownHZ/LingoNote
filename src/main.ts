@@ -9,6 +9,7 @@ interface UiConfig {
   font_size: number;
   line_height: number;
   radius: number;
+  opacity: number;
 }
 
 interface BehaviorConfig {
@@ -78,6 +79,12 @@ function setStatus(text: string) {
   statusEl.textContent = text;
 }
 
+/** 不透明度是 80–100 的整数百分比；缺失或非法时回落 100。 */
+function normalizeOpacity(value: number | undefined): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 100;
+  return Math.min(100, Math.max(80, Math.round(value)));
+}
+
 function applyUi(ui: UiConfig) {
   const root = document.documentElement;
   root.style.setProperty("--note-bg", ui.background || "#FFFFFF");
@@ -86,6 +93,7 @@ function applyUi(ui: UiConfig) {
   root.style.setProperty("--note-size", `${ui.font_size || 16}px`);
   root.style.setProperty("--note-line", `${ui.line_height || 1.65}`);
   root.style.setProperty("--note-radius", `${ui.radius ?? 12}px`);
+  root.style.setProperty("--note-opacity", String(normalizeOpacity(ui.opacity) / 100));
 }
 
 function showLoading() {

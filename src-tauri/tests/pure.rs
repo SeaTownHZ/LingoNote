@@ -242,3 +242,209 @@ fn max_chars_is_clamped_to_supported_range() {
         MAX_MAX_CHARS
     );
 }
+
+// ---------- M2.5：不透明度与位置策略 ----------
+
+#[test]
+fn ui_opacity_defaults_and_clamps() {
+    let config = StoredConfig::default();
+    assert_eq!(config.ui.opacity, DEFAULT_OPACITY);
+    assert_eq!(config.ui.opacity, 100);
+
+    let mut config = StoredConfig::default();
+    config.ui.opacity = 120;
+    assert_eq!(normalize_config(config).ui.opacity, MAX_OPACITY);
+
+    let mut config = StoredConfig::default();
+    config.ui.opacity = 10;
+    assert_eq!(normalize_config(config).ui.opacity, MIN_OPACITY);
+
+    // 老配置没有 opacity 字段时使用默认 100，其余 ui 字段不受影响。
+    let legacy: StoredConfig = serde_json::from_str(r#"{"ui": {"font_size": 18}}"#).unwrap();
+    assert_eq!(legacy.ui.opacity, DEFAULT_OPACITY);
+    assert_eq!(legacy.ui.font_size, 18);
+}
+
+#[test]
+fn window_config_defaults_and_normalization() {
+    let config = StoredConfig::default();
+    assert_eq!(config.window.position_mode, POSITION_MODE_CURSOR);
+    assert_eq!(config.window.anchor, DEFAULT_ANCHOR);
+    assert_eq!(config.window.margin_x, DEFAULT_MARGIN);
+    assert_eq!(config.window.margin_y, DEFAULT_MARGIN);
+    assert_eq!(config.window.last_x, None);
+    assert_eq!(config.window.last_y, None);
+
+    let mut config = StoredConfig::default();
+    config.window.position_mode = "floating".into();
+    config.window.anchor = "middle".into();
+    config.window.margin_x = -8;
+    config.window.margin_y = 999;
+    config.window.last_x = Some(-50);
+    config.window.last_y = Some(5000);
+    let normalized = normalize_config(config);
+    assert_eq!(normalized.window.position_mode, POSITION_MODE_CURSOR);
+    assert_eq!(normalized.window.anchor, DEFAULT_ANCHOR);
+    assert_eq!(normalized.window.margin_x, MIN_MARGIN);
+    assert_eq!(normalized.window.margin_y, MAX_MARGIN);
+    // 记住的坐标不做范围裁剪，使用时再夹回工作区。
+    assert_eq!(normalized.window.last_x, Some(-50));
+    assert_eq!(normalized.window.last_y, Some(5000));
+
+    let mut config = StoredConfig::default();
+    config.window.position_mode = "REMEMBER".into();
+    assert_eq!(
+        normalize_config(config).window.position_mode,
+        POSITION_MODE_REMEMBER
+    );
+}
+
+#[test]
+fn window_config_partial_json_uses_defaults_and_keeps_last_point() {
+    // 老 v2 配置没有 window 字段：默认值补齐，仍能正常反序列化。
+    let legacy: StoredConfig = serde_json::from_str(
+        r#"{"schema_version": 2, "base_url": "https://api.deepseek.com/v1", "model": "deepseek-chat"}"#,
+    )
+    .unwrap();
+    assert_eq!(legacy.window.position_mode, "cursor");
+    assert_eq!(legacy.window.anchor, "bottom-right");
+    assert_eq!(legacy.window.last_x, None);
+
+    // 只带部分 window 字段：缺的用默认值，已有的 last_x/last_y 保留。
+    let partial: StoredConfig = serde_json::from_str(
+        r#"{"window": {"position_mode": "remember", "last_x": 12, "last_y": -30}}"#,
+    )
+    .unwrap();
+    assert_eq!(partial.window.position_mode, "remember");
+    assert_eq!(partial.window.anchor, DEFAULT_ANCHOR);
+    assert_eq!(partial.window.margin_x, DEFAULT_MARGIN);
+    assert_eq!(partial.window.last_x, Some(12));
+    assert_eq!(partial.window.last_y, Some(-30));
+}
+
+#[test]
+fn unknown_anchor_falls_back_to_bottom_right() {
+    let work = WorkArea::new(0, 0, 1000, 800);
+    let win = (200, 100);
+    let margin = (10, 10);
+    let expected = anchor_position("bottom-right", win, work, margin);
+    assert_eq!(expected, (790, 690));
+    assert_eq!(anchor_position("diagonal", win, work, margin), expected);
+    assert_eq!(anchor_position("", win, work, margin), expected);
+
+    let mut config = StoredConfig::default();
+    config.window.anchor = "top-middle".into();
+    assert_eq!(normalize_config(config).window.anchor, DEFAULT_ANCHOR);
+}
+
+#[test]
+fn cursor_position_flips_when_bottom_right_has_no_room() {
+    let work = WorkArea::new(0, 0, 1920, 1040);
+    let win = (300, 200);
+
+    // 空间充足：出现在光标右下 12px。
+    assert_eq!(
+        cursor_position((100, 100), win, work, CURSOR_GAP),
+        (112, 112)
+    );
+
+    // 右下都放不下：横向、纵向同时翻转到光标左上。
+    assert_eq!(
+        cursor_position((1900, 1030), win, work, CURSOR_GAP),
+        (1900 - 300 - 12, 1030 - 200 - 12)
+    );
+
+    // 只有右侧溢出：只翻转 x，y 保持右下偏移。
+    assert_eq!(
+        cursor_position((1910, 100), win, work, CURSOR_GAP),
+        (1910 - 300 - 12, 112)
+    );
+
+    // 翻转后仍越界时由 clamp 夹回工作区。
+    let small = WorkArea::new(0, 0, 500, 400);
+    assert_eq!(cursor_position((310, 300), win, small, CURSOR_GAP), (0, 88));
+}
+
+#[test]
+fn clamp_position_keeps_note_inside_work_area() {
+    // 负坐标的左侧副屏。
+    let work = WorkArea::new(-1920, 0, 0, 1040);
+    let win = (400, 300);
+
+    // 记住的点落在屏幕外：夹回工作区可放置范围。
+    assert_eq!(clamp_position((-2500, -80), win, work), (-1920, 0));
+    assert_eq!(clamp_position((120, 2000), win, work), (-400, 740));
+    // 窗口会溢出右/下边缘时向左上夹回。
+    assert_eq!(clamp_position((-100, 100), win, work), (-400, 100));
+
+    // 窗口比工作区还大：贴左上，不产生反向区间。
+    let small_work = WorkArea::new(0, 0, 300, 200);
+    assert_eq!(
+        clamp_position((150, 100), (500, 400), small_work),
+        (0, 0)
+    );
+}
+
+#[test]
+fn anchor_position_covers_nine_grid() {
+    let work = WorkArea::new(0, 0, 1200, 900);
+    let win = (300, 200);
+    let margin = (20, 30);
+
+    let cases = [
+        ("top-left", (20, 30)),
+        ("top-center", (450, 30)),
+        ("top-right", (880, 30)),
+        ("center-left", (20, 350)),
+        ("center", (450, 350)),
+        ("center-right", (880, 350)),
+        ("bottom-left", (20, 670)),
+        ("bottom-center", (450, 670)),
+        ("bottom-right", (880, 670)),
+    ];
+    for (anchor, expected) in cases {
+        assert_eq!(
+            anchor_position(anchor, win, work, margin),
+            expected,
+            "anchor {anchor} 位置不符合九宫格"
+        );
+    }
+}
+
+#[test]
+fn anchor_position_applies_margin_and_clamps_oversized_window() {
+    let work = WorkArea::new(0, 0, 1200, 900);
+    let win = (300, 200);
+
+    assert_eq!(
+        anchor_position("bottom-right", win, work, (24, 40)),
+        (876, 660)
+    );
+    assert_eq!(anchor_position("top-left", win, work, (0, 0)), (0, 0));
+    // center 忽略边距，始终居中。
+    assert_eq!(
+        anchor_position("center", win, work, (400, 400)),
+        (450, 350)
+    );
+
+    // 窗口比工作区还大时，锚点位置被夹回工作区（贴左上）。
+    assert_eq!(
+        anchor_position("bottom-right", (1500, 1000), work, (24, 40)),
+        (0, 0)
+    );
+}
+
+#[test]
+fn config_json_contract_matches_spec_section_3() {
+    let config = StoredConfig::default();
+    let value = serde_json::to_value(&config).unwrap();
+
+    assert_eq!(value["ui"]["opacity"], 100);
+    assert_eq!(value["window"]["position_mode"], "cursor");
+    assert_eq!(value["window"]["anchor"], "bottom-right");
+    assert_eq!(value["window"]["margin_x"], 16);
+    assert_eq!(value["window"]["margin_y"], 16);
+    assert!(value["window"].get("last_x").is_some());
+    assert_eq!(value["window"]["last_x"], Value::Null);
+    assert_eq!(value["window"]["last_y"], Value::Null);
+}

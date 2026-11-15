@@ -12,6 +12,27 @@ pub const DEFAULT_MAX_CHARS: u32 = 20_000;
 pub const MIN_MAX_CHARS: u32 = 1_000;
 pub const MAX_MAX_CHARS: u32 = 100_000;
 
+/// 不透明度百分比（整数），越界在归一化时钳制。
+pub const DEFAULT_OPACITY: u32 = 100;
+pub const MIN_OPACITY: u32 = 80;
+pub const MAX_OPACITY: u32 = 100;
+
+/// 便签出现位置模式；未知值回落 `cursor`。
+pub const POSITION_MODE_CURSOR: &str = "cursor";
+pub const POSITION_MODE_ANCHOR: &str = "anchor";
+pub const POSITION_MODE_REMEMBER: &str = "remember";
+
+/// 九宫格锚点默认值；未知值回落 `bottom-right`。
+pub const DEFAULT_ANCHOR: &str = "bottom-right";
+
+/// 固定位置（anchor）时到工作区边缘的边距（像素）。
+pub const DEFAULT_MARGIN: i32 = 16;
+pub const MIN_MARGIN: i32 = 0;
+pub const MAX_MARGIN: i32 = 400;
+
+/// 跟随鼠标（cursor）时便签相对光标的间距（像素）。
+pub const CURSOR_GAP: i32 = 12;
+
 /// 默认系统提示词模板；`{target_language}` 会在请求时替换为目标语言。
 pub const DEFAULT_PROMPT: &str = "你是一名严谨的专业翻译。请把 <source_text> 标签内的内容翻译成{target_language}。\n\n\
 规则：\n\
@@ -30,6 +51,8 @@ pub struct UiConfig {
     pub font_size: u32,
     pub line_height: f64,
     pub radius: u32,
+    /// 便签整体不透明度（整数百分比，80–100）。
+    pub opacity: u32,
 }
 
 impl Default for UiConfig {
@@ -41,6 +64,35 @@ impl Default for UiConfig {
             font_size: 16,
             line_height: 1.65,
             radius: 12,
+            opacity: DEFAULT_OPACITY,
+        }
+    }
+}
+
+/// 便签窗口的位置策略；缺省或未知值在归一化时回落默认。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WindowConfig {
+    /// `cursor` 跟随鼠标 / `anchor` 固定位置 / `remember` 记住上次。
+    pub position_mode: String,
+    /// 九宫格锚点：`top-left` … `bottom-right`，`center` 居中。
+    pub anchor: String,
+    pub margin_x: i32,
+    pub margin_y: i32,
+    /// 上次显示/拖动后的坐标（物理像素）；由 Rust 侧维护，设置页不发送。
+    pub last_x: Option<i32>,
+    pub last_y: Option<i32>,
+}
+
+impl Default for WindowConfig {
+    fn default() -> Self {
+        Self {
+            position_mode: POSITION_MODE_CURSOR.into(),
+            anchor: DEFAULT_ANCHOR.into(),
+            margin_x: DEFAULT_MARGIN,
+            margin_y: DEFAULT_MARGIN,
+            last_x: None,
+            last_y: None,
         }
     }
 }
@@ -132,6 +184,7 @@ pub struct StoredConfig {
     pub target_language: String,
     pub hotkey: String,
     pub ui: UiConfig,
+    pub window: WindowConfig,
     pub behavior: BehaviorConfig,
     pub prompt: PromptConfig,
     pub history: HistoryConfig,
@@ -149,6 +202,7 @@ impl Default for StoredConfig {
             target_language: "简体中文".into(),
             hotkey: "Alt+Q".into(),
             ui: UiConfig::default(),
+            window: WindowConfig::default(),
             behavior: BehaviorConfig::default(),
             prompt: PromptConfig::default(),
             history: HistoryConfig::default(),
@@ -166,6 +220,7 @@ pub struct ConfigView {
     pub target_language: String,
     pub hotkey: String,
     pub ui: UiConfig,
+    pub window: WindowConfig,
     pub behavior: BehaviorConfig,
     pub prompt: String,
     pub default_prompt: String,
@@ -183,6 +238,9 @@ pub struct ConfigInput {
     pub api_key: Option<String>,
     pub ui: UiConfig,
     pub behavior: BehaviorConfig,
+    /// 老版本设置页不会发送该字段，缺省即默认位置策略。
+    #[serde(default)]
+    pub window: WindowConfig,
     #[serde(default)]
     pub prompt: PromptConfig,
     #[serde(default)]
@@ -240,6 +298,33 @@ fn clamp_u32(value: u32, min: u32, max: u32) -> u32 {
     value.max(min).min(max)
 }
 
+fn normalize_position_mode(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        POSITION_MODE_ANCHOR => POSITION_MODE_ANCHOR.into(),
+        POSITION_MODE_REMEMBER => POSITION_MODE_REMEMBER.into(),
+        _ => POSITION_MODE_CURSOR.into(),
+    }
+}
+
+fn normalize_anchor(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "top-left" | "top-center" | "top-right" | "center-left" | "center"
+        | "center-right" | "bottom-left" | "bottom-center" | "bottom-right" => {
+            value.trim().to_ascii_lowercase()
+        }
+        _ => DEFAULT_ANCHOR.into(),
+    }
+}
+
+/// 位置策略归一化：未知模式回落 `cursor`，未知锚点回落 `bottom-right`，边距钳制。
+fn normalize_window_config(mut window: WindowConfig) -> WindowConfig {
+    window.position_mode = normalize_position_mode(&window.position_mode);
+    window.anchor = normalize_anchor(&window.anchor);
+    window.margin_x = window.margin_x.clamp(MIN_MARGIN, MAX_MARGIN);
+    window.margin_y = window.margin_y.clamp(MIN_MARGIN, MAX_MARGIN);
+    window
+}
+
 /// 把任意来源的配置收敛到当前 schema 的合法范围。
 pub fn normalize_config(mut config: StoredConfig) -> StoredConfig {
     config.schema_version = SCHEMA_VERSION;
@@ -290,6 +375,9 @@ pub fn normalize_config(mut config: StoredConfig) -> StoredConfig {
     config.ui.font_size = clamp_u32(config.ui.font_size, 10, 48);
     config.ui.line_height = config.ui.line_height.clamp(1.0, 3.0);
     config.ui.radius = clamp_u32(config.ui.radius, 0, 32);
+    config.ui.opacity = clamp_u32(config.ui.opacity, MIN_OPACITY, MAX_OPACITY);
+
+    config.window = normalize_window_config(config.window);
 
     config.behavior.max_chars = clamp_u32(
         if config.behavior.max_chars == 0 {
@@ -313,6 +401,122 @@ pub fn normalize_config(mut config: StoredConfig) -> StoredConfig {
     config.legacy_api_key = config.legacy_api_key.trim().to_string();
 
     config
+}
+
+// ---------- 便签位置计算（纯函数，便于测试） ----------
+
+/// 显示器工作区（`rcWork`，已排除任务栏），单位物理像素。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WorkArea {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+impl WorkArea {
+    pub fn new(left: i32, top: i32, right: i32, bottom: i32) -> Self {
+        Self {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+
+    pub fn width(&self) -> i32 {
+        (self.right - self.left).max(0)
+    }
+
+    pub fn height(&self) -> i32 {
+        (self.bottom - self.top).max(0)
+    }
+}
+
+/// 把窗口左上角夹回工作区；窗口比工作区还大时贴左上。
+pub fn clamp_position(pos: (i32, i32), win: (i32, i32), work: WorkArea) -> (i32, i32) {
+    let (x, y) = pos;
+    let (win_w, win_h) = win;
+    let min_x = work.left;
+    let min_y = work.top;
+    let max_x = (work.right - win_w).max(min_x);
+    let max_y = (work.bottom - win_h).max(min_y);
+    (x.clamp(min_x, max_x), y.clamp(min_y, max_y))
+}
+
+/// 跟随鼠标：出现在光标右下 `gap` 像素处，右侧/下方空间不足时翻转到左上，最后夹回工作区。
+pub fn cursor_position(
+    cursor: (i32, i32),
+    win: (i32, i32),
+    work: WorkArea,
+    gap: i32,
+) -> (i32, i32) {
+    let (cursor_x, cursor_y) = cursor;
+    let (win_w, win_h) = win;
+    let mut x = cursor_x + gap;
+    let mut y = cursor_y + gap;
+    if x + win_w > work.right {
+        x = cursor_x - win_w - gap;
+    }
+    if y + win_h > work.bottom {
+        y = cursor_y - win_h - gap;
+    }
+    clamp_position((x, y), win, work)
+}
+
+#[derive(Clone, Copy)]
+enum HAlign {
+    Left,
+    Center,
+    Right,
+}
+
+#[derive(Clone, Copy)]
+enum VAlign {
+    Top,
+    Center,
+    Bottom,
+}
+
+/// 未知锚点按 `bottom-right` 处理（与配置归一化保持一致）。
+fn parse_anchor(anchor: &str) -> (HAlign, VAlign) {
+    match anchor.trim().to_ascii_lowercase().as_str() {
+        "top-left" => (HAlign::Left, VAlign::Top),
+        "top-center" => (HAlign::Center, VAlign::Top),
+        "top-right" => (HAlign::Right, VAlign::Top),
+        "center-left" => (HAlign::Left, VAlign::Center),
+        "center" => (HAlign::Center, VAlign::Center),
+        "center-right" => (HAlign::Right, VAlign::Center),
+        "bottom-left" => (HAlign::Left, VAlign::Bottom),
+        "bottom-center" => (HAlign::Center, VAlign::Bottom),
+        "bottom-right" => (HAlign::Right, VAlign::Bottom),
+        _ => (HAlign::Right, VAlign::Bottom),
+    }
+}
+
+/// 九宫格锚点定位：边距为到工作区边缘的距离，`center` 居中；结果夹回工作区。
+pub fn anchor_position(
+    anchor: &str,
+    win: (i32, i32),
+    work: WorkArea,
+    margin: (i32, i32),
+) -> (i32, i32) {
+    let (win_w, win_h) = win;
+    let (margin_x, margin_y) = margin;
+    let (horizontal, vertical) = parse_anchor(anchor);
+
+    let x = match horizontal {
+        HAlign::Left => work.left + margin_x,
+        HAlign::Center => work.left + (work.width() - win_w) / 2,
+        HAlign::Right => work.right - win_w - margin_x,
+    };
+    let y = match vertical {
+        VAlign::Top => work.top + margin_y,
+        VAlign::Center => work.top + (work.height() - win_h) / 2,
+        VAlign::Bottom => work.bottom - win_h - margin_y,
+    };
+
+    clamp_position((x, y), win, work)
 }
 
 /// 导出配置为 JSON；`StoredConfig` 的 `api_key` 字段本身不参与序列化。

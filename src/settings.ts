@@ -10,6 +10,30 @@ interface UiConfig {
   font_size: number;
   line_height: number;
   radius: number;
+  opacity: number;
+}
+
+type PositionMode = "cursor" | "anchor" | "remember";
+
+type Anchor =
+  | "top-left"
+  | "top-center"
+  | "top-right"
+  | "center-left"
+  | "center"
+  | "center-right"
+  | "bottom-left"
+  | "bottom-center"
+  | "bottom-right";
+
+interface WindowConfig {
+  position_mode: PositionMode;
+  anchor: Anchor;
+  margin_x: number;
+  margin_y: number;
+  /** 记住上次位置时由 Rust 写入；设置页保存时发送 null，交给 Rust 保留旧值。 */
+  last_x: number | null;
+  last_y: number | null;
 }
 
 interface BehaviorConfig {
@@ -38,6 +62,7 @@ interface ConfigView {
   hotkey: string;
   ui: UiConfig;
   behavior: BehaviorConfig;
+  window: WindowConfig;
   prompt: string;
   default_prompt: string;
   history: HistoryConfig;
@@ -53,6 +78,7 @@ interface ConfigInput {
   api_key: string | null;
   ui: UiConfig;
   behavior: BehaviorConfig;
+  window: WindowConfig;
   prompt: { system: string };
   history: HistoryConfig;
   logging: LoggingConfig;
@@ -99,6 +125,11 @@ const targetLanguage = el<HTMLInputElement>("target-language");
 const hideOnBlur = el<HTMLInputElement>("hide-on-blur");
 const appearFocused = el<HTMLInputElement>("appear-focused");
 const copyRestores = el<HTMLInputElement>("copy-restores");
+const positionMode = el<HTMLSelectElement>("position-mode");
+const anchor = el<HTMLSelectElement>("anchor");
+const marginX = el<HTMLInputElement>("margin-x");
+const marginY = el<HTMLInputElement>("margin-y");
+const positionHint = el<HTMLParagraphElement>("position-hint");
 const autostart = el<HTMLInputElement>("autostart");
 
 // 翻译服务
@@ -122,6 +153,8 @@ const fontFamily = el<HTMLInputElement>("font-family");
 const fontSize = el<HTMLInputElement>("font-size");
 const lineHeight = el<HTMLInputElement>("line-height");
 const radius = el<HTMLInputElement>("radius");
+const opacity = el<HTMLInputElement>("opacity");
+const opacityValue = el<HTMLSpanElement>("opacity-value");
 const preview = el<HTMLDivElement>("preview");
 const resetAppearanceBtn = el<HTMLButtonElement>("reset-appearance");
 const appearanceHint = el<HTMLSpanElement>("appearance-hint");
@@ -156,9 +189,9 @@ const closeBtn = el<HTMLButtonElement>("close");
 const quitBtn = el<HTMLButtonElement>("quit");
 
 const PAGE_META: Record<string, { title: string; desc: string }> = {
-  general: { title: "通用", desc: "热键、目标语言与便签行为。" },
+  general: { title: "通用", desc: "热键、目标语言、便签行为与出现位置。" },
   service: { title: "翻译服务", desc: "Endpoint、API Key、模型与系统提示词。" },
-  appearance: { title: "外观", desc: "主题、颜色、字体与便签圆角。" },
+  appearance: { title: "外观", desc: "主题、颜色、字体、圆角与不透明度。" },
   advanced: { title: "高级", desc: "本地历史、日志与配置备份。" },
   about: { title: "关于", desc: "版本、数据位置与隐私说明。" },
 };
@@ -171,6 +204,7 @@ const THEMES: Record<string, UiConfig> = {
     font_size: 16,
     line_height: 1.65,
     radius: 12,
+    opacity: 100,
   },
   cream: {
     background: "#FBF3D5",
@@ -179,6 +213,7 @@ const THEMES: Record<string, UiConfig> = {
     font_size: 16,
     line_height: 1.7,
     radius: 14,
+    opacity: 100,
   },
   green: {
     background: "#E8F1E4",
@@ -187,6 +222,7 @@ const THEMES: Record<string, UiConfig> = {
     font_size: 16,
     line_height: 1.7,
     radius: 12,
+    opacity: 100,
   },
   night: {
     background: "#1F242B",
@@ -195,6 +231,7 @@ const THEMES: Record<string, UiConfig> = {
     font_size: 16,
     line_height: 1.7,
     radius: 12,
+    opacity: 100,
   },
   sepia: {
     background: "#F3E9D2",
@@ -203,6 +240,7 @@ const THEMES: Record<string, UiConfig> = {
     font_size: 17,
     line_height: 1.75,
     radius: 10,
+    opacity: 100,
   },
 };
 
@@ -212,6 +250,45 @@ let appInfo: AppInfo | null = null;
 let saveTimer: number | null = null;
 let saveChain: Promise<boolean> = Promise.resolve(true);
 let suppressAutosave = false;
+
+const POSITION_MODES: PositionMode[] = ["cursor", "anchor", "remember"];
+const ANCHORS: Anchor[] = [
+  "top-left",
+  "top-center",
+  "top-right",
+  "center-left",
+  "center",
+  "center-right",
+  "bottom-left",
+  "bottom-center",
+  "bottom-right",
+];
+const DEFAULT_WINDOW_CONFIG: WindowConfig = {
+  position_mode: "cursor",
+  anchor: "bottom-right",
+  margin_x: 16,
+  margin_y: 16,
+  last_x: null,
+  last_y: null,
+};
+
+function normalizePositionMode(value: string | undefined): PositionMode {
+  return POSITION_MODES.includes(value as PositionMode) ? (value as PositionMode) : "cursor";
+}
+
+function normalizeAnchor(value: string | undefined): Anchor {
+  return ANCHORS.includes(value as Anchor) ? (value as Anchor) : "bottom-right";
+}
+
+function normalizeNumber(
+  value: number | undefined,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
 
 function clampInt(input: HTMLInputElement, fallback: number, min: number, max: number): number {
   const value = Number(input.value);
@@ -223,6 +300,22 @@ function clampFloat(input: HTMLInputElement, fallback: number, min: number, max:
   const value = Number(input.value);
   if (!Number.isFinite(value)) return fallback;
   return Math.round(Math.min(max, Math.max(min, value)) * 100) / 100;
+}
+
+/** 非 anchor 模式禁用锚点/边距，并按模式给出提示。 */
+function updatePositionUi() {
+  const mode = normalizePositionMode(positionMode.value);
+  const anchored = mode === "anchor";
+  anchor.disabled = !anchored;
+  marginX.disabled = !anchored;
+  marginY.disabled = !anchored;
+  if (mode === "remember") {
+    positionHint.textContent = "拖动便签后会自动记住位置；位置越界时会被夹回工作区。";
+  } else if (mode === "anchor") {
+    positionHint.textContent = "锚点以光标所在显示器的工作区为准，边距是到工作区边缘的距离。";
+  } else {
+    positionHint.textContent = "便签出现在光标右下角 12px；空间不足时自动翻转。";
+  }
 }
 
 function setResult(target: HTMLElement, text: string, kind: "ok" | "err" | "") {
@@ -240,12 +333,15 @@ function applyPreview() {
   const size = clampInt(fontSize, 16, 10, 48);
   const line = clampFloat(lineHeight, 1.65, 1, 3);
   const corner = clampInt(radius, 12, 0, 32);
+  const opacityPercent = clampInt(opacity, 100, 80, 100);
   preview.style.background = background.value || "#FFFFFF";
   preview.style.color = foreground.value || "#111111";
   preview.style.fontFamily = fontFamily.value.trim() || "SimSun";
   preview.style.fontSize = `${size}px`;
   preview.style.lineHeight = String(line);
   preview.style.borderRadius = `${corner}px`;
+  opacityValue.textContent = `${opacityPercent}%`;
+  document.documentElement.style.setProperty("--note-opacity", String(opacityPercent / 100));
 }
 
 function currentPromptForSave(): string {
@@ -267,6 +363,7 @@ function collect(): ConfigInput {
       font_size: clampInt(fontSize, 16, 10, 48),
       line_height: clampFloat(lineHeight, 1.65, 1, 3),
       radius: clampInt(radius, 12, 0, 32),
+      opacity: clampInt(opacity, 100, 80, 100),
     },
     behavior: {
       hide_on_blur: hideOnBlur.checked,
@@ -274,6 +371,15 @@ function collect(): ConfigInput {
       appear_focused: appearFocused.checked,
       pause_hotkey: pauseHotkey.checked,
       max_chars: clampInt(maxChars, 20_000, 1_000, 100_000),
+    },
+    window: {
+      position_mode: normalizePositionMode(positionMode.value),
+      anchor: normalizeAnchor(anchor.value),
+      margin_x: clampInt(marginX, 16, 0, 400),
+      margin_y: clampInt(marginY, 16, 0, 400),
+      // 设置页不负责记录坐标：发送 null，由 Rust 保留磁盘上已有的 last_x/last_y。
+      last_x: null,
+      last_y: null,
     },
     prompt: { system: currentPromptForSave() },
     history: { enabled: historyEnabled.checked, limit: 200 },
@@ -369,6 +475,16 @@ function fillConfig(config: ConfigView, status: HotkeyStatus) {
     fontSize.value = String(config.ui.font_size || 16);
     lineHeight.value = String(config.ui.line_height || 1.65);
     radius.value = String(config.ui.radius ?? 12);
+    opacity.value = String(normalizeNumber(config.ui.opacity, 100, 80, 100));
+
+    // 老版本后端可能还没有 window 字段，这里按默认值兜底。
+    const windowConfig = config.window ?? DEFAULT_WINDOW_CONFIG;
+    positionMode.value = normalizePositionMode(windowConfig.position_mode);
+    anchor.value = normalizeAnchor(windowConfig.anchor);
+    marginX.value = String(normalizeNumber(windowConfig.margin_x, 16, 0, 400));
+    marginY.value = String(normalizeNumber(windowConfig.margin_y, 16, 0, 400));
+    updatePositionUi();
+
     applyPreview();
 
     hideOnBlur.checked = config.behavior.hide_on_blur;
@@ -410,6 +526,8 @@ function applyTheme(name: string) {
   fontSize.value = String(theme.font_size);
   lineHeight.value = String(theme.line_height);
   radius.value = String(theme.radius);
+  // 切换主题 / 恢复默认外观都回到不透明。
+  opacity.value = String(theme.opacity ?? 100);
   applyPreview();
   markActiveTheme(name);
 }
@@ -613,6 +731,22 @@ for (const input of [background, foreground, fontFamily, fontSize, lineHeight, r
     applyPreview();
     scheduleSave();
   });
+}
+
+opacity.addEventListener("input", () => {
+  applyPreview();
+  scheduleSave();
+});
+
+positionMode.addEventListener("change", () => {
+  updatePositionUi();
+  scheduleSave();
+});
+
+anchor.addEventListener("change", () => scheduleSave());
+
+for (const input of [marginX, marginY]) {
+  input.addEventListener("input", () => scheduleSave());
 }
 
 for (const input of [baseUrl, model, targetLanguage, maxChars, promptArea]) {

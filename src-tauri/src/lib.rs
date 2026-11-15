@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -16,9 +16,10 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 mod logging;
 mod pure;
 use pure::{
-    build_export, friendly_http_error, normalize_config, normalize_url, parse_import,
-    push_history, resolve_prompt, write_atomic, ConfigInput, ConfigView, HistoryEntry, StoredConfig,
-    DEFAULT_MAX_CHARS,
+    anchor_position, build_export, clamp_position, cursor_position, friendly_http_error,
+    normalize_config, normalize_url, parse_import, push_history, resolve_prompt, write_atomic,
+    ConfigInput, ConfigView, HistoryEntry, StoredConfig, WorkArea, CURSOR_GAP, DEFAULT_MAX_CHARS,
+    POSITION_MODE_ANCHOR, POSITION_MODE_REMEMBER,
 };
 
 const KEYRING_SERVICE: &str = "LingoNote";
@@ -222,6 +223,7 @@ fn build_config_view(app: &AppHandle, state: &HotkeyState) -> ConfigView {
         target_language: stored.target_language,
         hotkey,
         ui: stored.ui,
+        window: stored.window,
         behavior,
         prompt: stored.prompt.system,
         default_prompt: pure::DEFAULT_PROMPT.to_string(),
@@ -258,10 +260,20 @@ fn save_config(
         .unwrap_or(false);
 
     let mut stored = load_stored_config(&app);
+    let mut window = config.window;
+    // 设置页自动保存不带 last_x/last_y（None），必须保留磁盘上记住的位置，
+    // 否则每次改外观都会把“记住上次位置”清空。
+    if window.last_x.is_none() {
+        window.last_x = stored.window.last_x;
+    }
+    if window.last_y.is_none() {
+        window.last_y = stored.window.last_y;
+    }
     stored.base_url = config.base_url;
     stored.model = config.model;
     stored.target_language = config.target_language;
     stored.ui = config.ui;
+    stored.window = window;
     stored.behavior = config.behavior;
     // 暂停状态以运行时为准，避免设置页的旧值把托盘里的暂停覆盖掉。
     stored.behavior.pause_hotkey = paused;
@@ -272,6 +284,7 @@ fn save_config(
 
     let stored = normalize_config(stored);
     write_stored_config(&app, &stored)?;
+    cache_note_position_mode(&stored.window.position_mode);
     configure_logging(&app, &stored);
 
     let _ = app.emit_to("note", "config-changed", ());
@@ -336,6 +349,7 @@ fn import_config(
     }
 
     write_stored_config(&app, &imported)?;
+    cache_note_position_mode(&imported.window.position_mode);
     if let Err(error) = sync_hotkey_from_config(
         &app,
         &state,
@@ -366,6 +380,7 @@ fn reset_config(app: AppHandle, state: State<'_, HotkeyState>) -> Result<ConfigV
 
     let defaults = StoredConfig::default();
     write_stored_config(&app, &defaults)?;
+    cache_note_position_mode(&defaults.window.position_mode);
 
     if let Err(error) = sync_hotkey_from_config(&app, &state, &defaults.hotkey, false) {
         logging::error(format!("恢复默认热键失败：{error}"));
@@ -648,10 +663,15 @@ fn hide_note(window: WebviewWindow) -> Result<(), String> {
 
 #[tauri::command]
 fn show_note(window: WebviewWindow) -> Result<(), String> {
-    let appear_focused = {
-        let app = window.app_handle().clone();
-        load_stored_config(&app).behavior.appear_focused
-    };
+    let app = window.app_handle().clone();
+    // 一次读取配置：定位只依赖这一份快照。
+    let stored = load_stored_config(&app);
+    // 顺带刷新拖动跟踪用的模式缓存，配置文件被外部改动后也能跟上。
+    cache_note_position_mode(&stored.window.position_mode);
+    let appear_focused = stored.behavior.appear_focused;
+
+    #[cfg(target_os = "windows")]
+    let window_config = stored.window;
 
     #[cfg(target_os = "windows")]
     {
@@ -683,38 +703,65 @@ fn show_note(window: WebviewWindow) -> Result<(), String> {
 
         unsafe {
             let mut pt = POINT::default();
-            if GetCursorPos(&mut pt) == 0 {
-                pt = POINT { x: 0, y: 0 };
-            }
+            let (cursor_x, cursor_y) = if GetCursorPos(&mut pt) == 0 {
+                (0, 0)
+            } else {
+                (pt.x, pt.y)
+            };
+
+            // 显示器选择：cursor/anchor 用光标所在屏；remember 用保存点最近的屏，
+            // 保存点缺失时回退光标。
+            let monitor_point = if window_config.position_mode == POSITION_MODE_REMEMBER {
+                match (window_config.last_x, window_config.last_y) {
+                    (Some(last_x), Some(last_y)) => POINT {
+                        x: last_x,
+                        y: last_y,
+                    },
+                    _ => POINT {
+                        x: cursor_x,
+                        y: cursor_y,
+                    },
+                }
+            } else {
+                POINT {
+                    x: cursor_x,
+                    y: cursor_y,
+                }
+            };
 
             let mut monitor: MONITORINFO = std::mem::zeroed();
             monitor.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
-            let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
-            let mut work = RECT {
+            let hmon = MonitorFromPoint(monitor_point, MONITOR_DEFAULTTONEAREST);
+            let fallback = RECT {
                 left: 0,
                 top: 0,
                 right: GetSystemMetrics(SM_CXSCREEN),
                 bottom: GetSystemMetrics(SM_CYSCREEN),
             };
-            if !hmon.is_null() && GetMonitorInfoW(hmon, &mut monitor) != 0 {
-                work = monitor.rcWork;
-            }
+            let work = if !hmon.is_null() && GetMonitorInfoW(hmon, &mut monitor) != 0 {
+                monitor.rcWork
+            } else {
+                fallback
+            };
 
-            let gap = 12;
-            let mut x = pt.x + gap;
-            let mut y = pt.y + gap;
-            if x + win_w > work.right {
-                x = pt.x - win_w - gap;
-            }
-            if y + win_h > work.bottom {
-                y = pt.y - win_h - gap;
-            }
-            if x < work.left {
-                x = work.left;
-            }
-            if y < work.top {
-                y = work.top;
-            }
+            let work_area = WorkArea::new(work.left, work.top, work.right, work.bottom);
+            let win = (win_w, win_h);
+            let cursor = (cursor_x, cursor_y);
+            let (x, y) = match window_config.position_mode.as_str() {
+                POSITION_MODE_ANCHOR => anchor_position(
+                    &window_config.anchor,
+                    win,
+                    work_area,
+                    (window_config.margin_x, window_config.margin_y),
+                ),
+                POSITION_MODE_REMEMBER => match (window_config.last_x, window_config.last_y) {
+                    (Some(last_x), Some(last_y)) => {
+                        clamp_position((last_x, last_y), win, work_area)
+                    }
+                    _ => cursor_position(cursor, win, work_area, CURSOR_GAP),
+                },
+                _ => cursor_position(cursor, win, work_area, CURSOR_GAP),
+            };
 
             ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             SetWindowPos(
@@ -768,6 +815,108 @@ fn show_note(window: WebviewWindow) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+// ---------- 便签位置记忆 ----------
+
+/// note 窗口当前位置模式的缓存：拖动时 Moved 每帧触发，不必每帧读磁盘配置。
+static NOTE_POSITION_MODE: Mutex<String> = Mutex::new(String::new());
+/// 去抖窗口内最新的便签坐标（物理像素）。
+static NOTE_MOVE_PENDING: Mutex<Option<(i32, i32)>> = Mutex::new(None);
+/// 是否已有去抖线程在等待落盘。
+static NOTE_MOVE_DEBOUNCING: AtomicBool = AtomicBool::new(false);
+
+/// 拖动停止约 600ms 后再落盘，避免拖动过程中每帧写配置。
+const NOTE_MOVE_DEBOUNCE: Duration = Duration::from_millis(600);
+
+fn cache_note_position_mode(mode: &str) {
+    if let Ok(mut cached) = NOTE_POSITION_MODE.lock() {
+        *cached = mode.to_string();
+    }
+}
+
+fn note_remembers_position() -> bool {
+    NOTE_POSITION_MODE
+        .lock()
+        .map(|cached| cached.as_str() == POSITION_MODE_REMEMBER)
+        .unwrap_or(false)
+}
+
+/// 记录一次 Moved：更新待写坐标，并确保只有一个去抖线程在跑。
+fn schedule_note_position_save(app: AppHandle, x: i32, y: i32) {
+    if let Ok(mut pending) = NOTE_MOVE_PENDING.lock() {
+        *pending = Some((x, y));
+    }
+    if NOTE_MOVE_DEBOUNCING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    std::thread::spawn(move || loop {
+        std::thread::sleep(NOTE_MOVE_DEBOUNCE);
+
+        let pending = NOTE_MOVE_PENDING
+            .lock()
+            .ok()
+            .and_then(|mut value| value.take());
+        if let Some((x, y)) = pending {
+            persist_note_position(&app, x, y);
+        }
+
+        let has_newer = NOTE_MOVE_PENDING
+            .lock()
+            .map(|value| value.is_some())
+            .unwrap_or(false);
+        if has_newer {
+            continue;
+        }
+
+        NOTE_MOVE_DEBOUNCING.store(false, Ordering::SeqCst);
+        // 置 false 的瞬间可能刚好有新事件写入，重新接管，避免丢失最后一次位置。
+        let raced = NOTE_MOVE_PENDING
+            .lock()
+            .map(|value| value.is_some())
+            .unwrap_or(false);
+        if raced && !NOTE_MOVE_DEBOUNCING.swap(true, Ordering::SeqCst) {
+            continue;
+        }
+        break;
+    });
+}
+
+/// 只改磁盘配置里的 window.last_x/last_y；其它字段以磁盘当前值为准，且不广播事件。
+fn persist_note_position(app: &AppHandle, x: i32, y: i32) {
+    let mut stored = load_stored_config(app);
+    // 拖动期间可能已切回其它模式，落盘前再确认一次。
+    if stored.window.position_mode != POSITION_MODE_REMEMBER {
+        return;
+    }
+    if stored.window.last_x == Some(x) && stored.window.last_y == Some(y) {
+        return;
+    }
+
+    stored.window.last_x = Some(x);
+    stored.window.last_y = Some(y);
+    let stored = normalize_config(stored);
+    if let Err(error) = write_stored_config(app, &stored) {
+        logging::error(format!("保存便签位置失败：{error}"));
+    }
+}
+
+/// 在 setup 中为 note 窗口注册拖动跟踪；只有 remember 模式才记录。
+fn register_note_move_tracking(app: &AppHandle, stored: &StoredConfig) {
+    cache_note_position_mode(&stored.window.position_mode);
+
+    let Some(note) = app.get_webview_window("note") else {
+        return;
+    };
+    let handle = app.clone();
+    note.on_window_event(move |event| {
+        if let tauri::WindowEvent::Moved(position) = event {
+            if note_remembers_position() {
+                schedule_note_position_save(handle.clone(), position.x, position.y);
+            }
+        }
+    });
 }
 
 // ---------- 翻译 ----------
@@ -1305,6 +1454,7 @@ pub fn run() {
             ));
 
             register_initial_hotkey(&handle, &stored);
+            register_note_move_tracking(&handle, &stored);
             let _ = setup_tray(app);
 
             if let Some(settings) = app.get_webview_window("settings") {

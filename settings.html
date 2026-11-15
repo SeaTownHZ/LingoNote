@@ -97,6 +97,46 @@
             </label>
           </section>
 
+          <section class="settings-card">
+            <h2>出现位置</h2>
+            <p class="hint">控制便签出现在屏幕的哪个位置。多显示器时，跟随鼠标或锚点都以光标所在的显示器为准。</p>
+            <label class="field">
+              <span>出现位置</span>
+              <select id="position-mode">
+                <option value="cursor">跟随鼠标</option>
+                <option value="anchor">固定位置</option>
+                <option value="remember">记住上次位置</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>锚点</span>
+              <select id="anchor">
+                <option value="top-left">左上角</option>
+                <option value="top-center">顶部居中</option>
+                <option value="top-right">右上角</option>
+                <option value="center-left">左侧居中</option>
+                <option value="center">居中</option>
+                <option value="center-right">右侧居中</option>
+                <option value="bottom-left">左下角</option>
+                <option value="bottom-center">底部居中</option>
+                <option value="bottom-right" selected>右下角</option>
+              </select>
+            </label>
+            <div class="grid-2">
+              <label class="field">
+                <span>横向边距（px）</span>
+                <input id="margin-x" type="number" min="0" max="400" step="1" value="16" />
+              </label>
+              <label class="field">
+                <span>纵向边距（px）</span>
+                <input id="margin-y" type="number" min="0" max="400" step="1" value="16" />
+              </label>
+            </div>
+            <p class="hint position-hint" id="position-hint">
+              便签出现在光标右下角 12px；空间不足时自动翻转。
+            </p>
+          </section>
+
           <section class="settings-card compact">
             <h2>启动</h2>
             <label class="check-row">
@@ -203,6 +243,14 @@
                 <input id="radius" type="number" min="0" max="32" step="1" value="12" />
               </label>
             </div>
+
+            <label class="field">
+              <span>不透明度（80–100%）</span>
+              <div class="range-row">
+                <input id="opacity" type="range" min="80" max="100" step="1" value="100" />
+                <span id="opacity-value" class="range-value">100%</span>
+              </div>
+            </label>
 
             <div class="preview-note" id="preview">
               这是一段示例译文。
