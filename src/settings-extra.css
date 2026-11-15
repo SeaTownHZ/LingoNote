@@ -1,0 +1,49 @@
+/* T3 · 设置页增量样式：录制态高亮 / 取点行布局 / 隐藏规则。
+   其余基础样式（按钮、字段、卡片、.hidden 等）沿用 styles.css，不在此重复。 */
+
+/* ---------- 热键录制态 ---------- */
+
+#hotkey.recording {
+  border-color: #2f9e8f;
+  background: #f1faf8;
+  color: #1b6f61;
+  font-family: "Microsoft YaHei", sans-serif;
+  letter-spacing: 0.04em;
+  box-shadow: 0 0 0 3px rgba(47, 158, 143, 0.18);
+}
+
+#record-hotkey.recording {
+  border-color: #2f9e8f;
+  background: #2f9e8f;
+  color: #ffffff;
+}
+
+#record-hotkey.recording:hover {
+  background: #288d80;
+}
+
+/* ---------- 取点行 ---------- */
+
+.pick-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 2px 0 8px;
+}
+
+.pick-row #picked-position {
+  flex: 1 1 120px;
+  min-width: 0;
+}
+
+.pick-row #clear-position {
+  flex: 0 0 auto;
+}
+
+/* ---------- 隐藏规则（取点区块 / 边距区块互斥显示） ---------- */
+
+#position-custom.hidden,
+#margin-fields.hidden {
+  display: none !important;
+}

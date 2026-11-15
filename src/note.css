@@ -1,0 +1,81 @@
+/* M4 · 便签页新增样式（0.4.0）
+ * 只放本次新增的规则：toast、尺寸把手、图钉激活态。
+ * 基础外观仍在 src/styles.css，不要在这里重复已有规则。 */
+
+/* ---------- 图钉（FR-19 C） ---------- */
+
+.icon-btn.active {
+  background: #e6f4f0;
+  color: #1f7a6c;
+}
+
+.icon-btn.active:hover {
+  background: #d9eee8;
+  color: #175f55;
+}
+
+/* ---------- 尺寸把手（FR-19 A） ---------- */
+
+#resize {
+  position: fixed;
+  right: 4px;
+  bottom: 4px;
+  width: 12px;
+  height: 12px;
+  cursor: nwse-resize;
+  touch-action: none;
+  z-index: 30;
+  opacity: 0.45;
+  border-bottom-right-radius: 3px;
+  background-image: repeating-linear-gradient(
+    -45deg,
+    transparent 0 3px,
+    rgba(47, 158, 143, 0.9) 3px 4px
+  );
+}
+
+#resize:hover {
+  opacity: 0.95;
+}
+
+/* 拖动期间整体光标与选区保持“调整中”的状态。 */
+.note-body.note-resizing,
+.note-body.note-resizing * {
+  cursor: nwse-resize;
+  user-select: none;
+}
+
+/* ---------- 轻提示（FR-18） ---------- */
+
+#toast {
+  position: fixed;
+  left: 50%;
+  bottom: 40px;
+  transform: translateX(-50%);
+  z-index: 40;
+  max-width: 78vw;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: rgba(23, 32, 30, 0.88);
+  box-shadow: 0 4px 14px rgba(12, 40, 37, 0.24);
+  color: #ffffff;
+  font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  animation: note-toast-in 0.14s ease;
+}
+
+@keyframes note-toast-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 4px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}

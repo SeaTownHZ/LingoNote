@@ -49,8 +49,13 @@
             <div class="hotkey-row">
               <input id="hotkey" type="text" spellcheck="false" placeholder="Alt+Q" />
               <button id="apply-hotkey" class="secondary-btn" type="button">应用热键</button>
+              <button id="record-hotkey" class="secondary-btn" type="button">录制</button>
               <span id="hotkey-result" class="test-result"></span>
             </div>
+            <p class="hint">
+              点「录制」后直接按组合键（至少含 Ctrl / Alt / Shift 之一），Esc 或点别处取消。不支持 Win
+              键组合，必要时可直接手动输入。
+            </p>
             <label class="check-row">
               <input id="pause-hotkey" type="checkbox" />
               <span>暂停全局热键（暂停后仍可用托盘菜单「翻译剪贴板」）</span>
@@ -79,6 +84,14 @@
                 <option value="Español"></option>
                 <option value="Русский"></option>
               </datalist>
+            </label>
+            <label class="check-row">
+              <input id="read-selection" type="checkbox" checked />
+              <span>优先读取选中文本（自动复制后恢复剪贴板）</span>
+            </label>
+            <label class="check-row">
+              <input id="double-press-copies" type="checkbox" checked />
+              <span>便签显示译文时，再次按热键复制并关闭</span>
             </label>
             <label class="check-row">
               <input id="hide-on-blur" type="checkbox" />
@@ -121,9 +134,10 @@
                 <option value="bottom-left">左下角</option>
                 <option value="bottom-center">底部居中</option>
                 <option value="bottom-right" selected>右下角</option>
+                <option value="custom">自定义位置</option>
               </select>
             </label>
-            <div class="grid-2">
+            <div id="margin-fields" class="grid-2">
               <label class="field">
                 <span>横向边距（px）</span>
                 <input id="margin-x" type="number" min="0" max="400" step="1" value="16" />
@@ -132,6 +146,16 @@
                 <span>纵向边距（px）</span>
                 <input id="margin-y" type="number" min="0" max="400" step="1" value="16" />
               </label>
+            </div>
+            <div id="position-custom" class="position-custom hidden">
+              <div class="pick-row">
+                <button id="pick-position" class="secondary-btn" type="button">在屏幕上取点</button>
+                <span id="picked-position" class="test-result">未取点</span>
+                <button id="clear-position" class="ghost-btn" type="button" disabled>清除取点</button>
+              </div>
+              <p class="hint">
+                取点遮罩只覆盖鼠标所在的显示器：单击目标位置即完成，Esc 或右键取消。之后可随时重新取点。
+              </p>
             </div>
             <p class="hint position-hint" id="position-hint">
               便签出现在光标右下角 12px；空间不足时自动翻转。

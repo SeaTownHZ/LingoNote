@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -7,19 +8,24 @@ use std::time::{Duration, Instant};
 use futures_util::StreamExt;
 use serde::Serialize;
 use serde_json::{json, Value};
-use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
-use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, Wry};
+use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
+use tauri::{
+    AppHandle, Emitter, Manager, PhysicalPosition, LogicalSize, PhysicalSize, State, WebviewUrl,
+    WebviewWindow, WebviewWindowBuilder, Wry,
+};
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
+use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 mod logging;
 mod pure;
 use pure::{
-    anchor_position, build_export, clamp_position, cursor_position, friendly_http_error, is_newer,
-    normalize_config, normalize_url, normalize_version, parse_import, push_history, resolve_prompt,
-    write_atomic, ConfigInput, ConfigView, HistoryEntry, StoredConfig, WorkArea, CURSOR_GAP,
-    DEFAULT_MAX_CHARS, POSITION_MODE_ANCHOR, POSITION_MODE_REMEMBER,
+    anchor_position, build_export, clamp_note_size, clamp_position, cursor_position,
+    format_recent_label, friendly_http_error, is_newer, merge_window_for_save, normalize_config,
+    normalize_url, normalize_version, parse_import, preview_text, push_history, resolve_prompt,
+    write_atomic, ConfigInput, ConfigView, HistoryEntry, StoredConfig, WorkArea, ANCHOR_CUSTOM,
+    CURSOR_GAP, DEFAULT_ANCHOR, DEFAULT_MAX_CHARS, POSITION_MODE_ANCHOR, POSITION_MODE_REMEMBER,
 };
 
 const KEYRING_SERVICE: &str = "LingoNote";
@@ -32,6 +38,47 @@ const UPDATE_TIMEOUT: Duration = Duration::from_secs(8);
 const UPDATE_NOTES_LIMIT: usize = 4000;
 
 static CONFIG_WARNING: Mutex<Option<String>> = Mutex::new(None);
+
+/// 托盘 id（最近翻译点击复制后 3 秒恢复默认 tooltip，SPEC 4.5）。
+const TRAY_ID: &str = "lingonote-tray";
+
+/// 取点遮罩窗口 label / URL（SPEC 4.4）。
+const POSITION_PICK_LABEL: &str = "position-pick";
+const POSITION_PICK_URL: &str = "position-pick.html";
+
+/// 最近翻译容量与空剪贴板错误文案（SPEC 4.1 / 4.5）。
+const RECENT_CAPACITY: usize = 5;
+const EMPTY_CLIPBOARD_ERROR: &str = "剪贴板里没有可翻译的文本。复制一段文字后再按热键。";
+
+/// 取点成功后的便签预览时长。
+const PREVIEW_DURATION: Duration = Duration::from_millis(800);
+/// 「已复制」tooltip 的展示时长。
+const TRAY_TOOLTIP_DURATION: Duration = Duration::from_millis(3000);
+
+/// 取点遮罩是否打开：期间屏蔽全局热键与托盘「翻译剪贴板」（SPEC 4.4）。
+static PICKING: AtomicBool = AtomicBool::new(false);
+/// 便签预览代际：每次 show_note 自增，取点预览超时后只在代数未变时隐藏。
+static PREVIEW_GENERATION: AtomicU64 = AtomicU64::new(0);
+/// tooltip 代际：连续点击最近翻译时只让最后一次的 3 秒计时生效。
+static TRAY_TOOLTIP_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// 会话内最近翻译（仅内存，不落盘，SPEC 4.5）。
+static RECENT: Mutex<VecDeque<RecentEntry>> = Mutex::new(VecDeque::new());
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RecentEntry {
+    /// `HH:MM`。
+    pub at: String,
+    pub text: String,
+}
+
+/// 选区直读结果（SPEC 4.1）。
+#[derive(Debug, Clone, Serialize)]
+pub struct SourceText {
+    pub text: String,
+    pub from_selection: bool,
+    pub clipboard_restored: bool,
+}
 
 #[derive(Debug, Clone, Serialize)]
 struct HotkeyStatus {
@@ -79,7 +126,12 @@ struct TrayMenu {
 }
 
 #[derive(Default)]
-struct TrayState(Mutex<Option<TrayMenu>>);
+struct TrayState {
+    /// 当前菜单里的勾选/禁用项，用于免重建地更新勾选状态。
+    menu: Mutex<Option<TrayMenu>>,
+    /// 保留 TrayIcon 句柄，便于翻译成功后动态 `set_menu`（SPEC 4.5）。
+    tray: Mutex<Option<TrayIcon<Wry>>>,
+}
 
 #[derive(Debug, Clone, Serialize)]
 struct AppInfo {
@@ -277,15 +329,9 @@ fn save_config(
         .unwrap_or(false);
 
     let mut stored = load_stored_config(&app);
-    let mut window = config.window;
-    // 设置页自动保存不带 last_x/last_y（None），必须保留磁盘上记住的位置，
-    // 否则每次改外观都会把“记住上次位置”清空。
-    if window.last_x.is_none() {
-        window.last_x = stored.window.last_x;
-    }
-    if window.last_y.is_none() {
-        window.last_y = stored.window.last_y;
-    }
+    // 设置页自动保存不带 last_x/last_y（None），必须保留磁盘上记住的位置；
+    // fixed_x/fixed_y 的 None 则表示“清除取点”，由 SPEC 3 单独约定，不保留。
+    let window = merge_window_for_save(config.window, &stored.window);
     stored.base_url = config.base_url;
     stored.model = config.model;
     stored.target_language = config.target_language;
@@ -848,6 +894,8 @@ fn hide_note(window: WebviewWindow) -> Result<(), String> {
 
 #[tauri::command]
 fn show_note(window: WebviewWindow) -> Result<(), String> {
+    // 任何一次正式显示都让等待中的取点预览失效，避免 800ms 后误隐藏译文。
+    PREVIEW_GENERATION.fetch_add(1, Ordering::SeqCst);
     let app = window.app_handle().clone();
     // 一次读取配置：定位只依赖这一份快照。
     let stored = load_stored_config(&app);
@@ -894,10 +942,10 @@ fn show_note(window: WebviewWindow) -> Result<(), String> {
                 (pt.x, pt.y)
             };
 
-            // 显示器选择：cursor/anchor 用光标所在屏；remember 用保存点最近的屏，
-            // 保存点缺失时回退光标。
-            let monitor_point = if window_config.position_mode == POSITION_MODE_REMEMBER {
-                match (window_config.last_x, window_config.last_y) {
+            // 显示器选择：cursor/anchor 用光标所在屏；remember 用保存点最近的屏；
+            // custom 用取点最近的屏（越界时夹到该屏工作区，AC-37）。
+            let monitor_point = match window_config.position_mode.as_str() {
+                POSITION_MODE_REMEMBER => match (window_config.last_x, window_config.last_y) {
                     (Some(last_x), Some(last_y)) => POINT {
                         x: last_x,
                         y: last_y,
@@ -906,12 +954,23 @@ fn show_note(window: WebviewWindow) -> Result<(), String> {
                         x: cursor_x,
                         y: cursor_y,
                     },
+                },
+                POSITION_MODE_ANCHOR if window_config.anchor == ANCHOR_CUSTOM => {
+                    match (window_config.fixed_x, window_config.fixed_y) {
+                        (Some(fixed_x), Some(fixed_y)) => POINT {
+                            x: fixed_x,
+                            y: fixed_y,
+                        },
+                        _ => POINT {
+                            x: cursor_x,
+                            y: cursor_y,
+                        },
+                    }
                 }
-            } else {
-                POINT {
+                _ => POINT {
                     x: cursor_x,
                     y: cursor_y,
-                }
+                },
             };
 
             let mut monitor: MONITORINFO = std::mem::zeroed();
@@ -933,6 +992,21 @@ fn show_note(window: WebviewWindow) -> Result<(), String> {
             let win = (win_w, win_h);
             let cursor = (cursor_x, cursor_y);
             let (x, y) = match window_config.position_mode.as_str() {
+                POSITION_MODE_ANCHOR if window_config.anchor == ANCHOR_CUSTOM => {
+                    match (window_config.fixed_x, window_config.fixed_y) {
+                        // 取点坐标即左上角；越界时统一夹回工作区（AC-37）。
+                        (Some(fixed_x), Some(fixed_y)) => {
+                            clamp_position((fixed_x, fixed_y), win, work_area)
+                        }
+                        // 归一化已保证 custom 必有坐标；这里仍防御性回退右下角。
+                        _ => anchor_position(
+                            DEFAULT_ANCHOR,
+                            win,
+                            work_area,
+                            (window_config.margin_x, window_config.margin_y),
+                        ),
+                    }
+                }
                 POSITION_MODE_ANCHOR => anchor_position(
                     &window_config.anchor,
                     win,
@@ -997,6 +1071,268 @@ fn show_note(window: WebviewWindow) -> Result<(), String> {
 
     if appear_focused {
         let _ = window.set_focus();
+    }
+
+    Ok(())
+}
+
+// ---------- 便签尺寸、钉住与取点（SPEC 4.2–4.4） ----------
+
+#[tauri::command]
+fn set_note_size(window: WebviewWindow, width: u32, height: u32) -> Result<(), String> {
+    let (width, height) = clamp_note_size(width, height);
+    window
+        .set_size(LogicalSize::new(width, height))
+        .map_err(|error| format!("调整便签尺寸失败：{error}"))?;
+
+    let app = window.app_handle();
+    let mut stored = load_stored_config(app);
+    if stored.window.note_width == width && stored.window.note_height == height {
+        return Ok(());
+    }
+    stored.window.note_width = width;
+    stored.window.note_height = height;
+    let stored = normalize_config(stored);
+    // 尺寸只落盘，不广播 config-changed（SPEC 4.2）。
+    write_stored_config(app, &stored)
+}
+
+#[tauri::command]
+fn set_note_pinned(app: AppHandle, pinned: bool) -> Result<(), String> {
+    let mut stored = load_stored_config(&app);
+    stored.window.pinned = pinned;
+    let stored = normalize_config(stored);
+    write_stored_config(&app, &stored)?;
+    let _ = app.emit_to("note", "config-changed", ());
+    let _ = app.emit_to("settings", "config-changed", ());
+    logging::info(format!("note pinned set to {pinned}"));
+    Ok(())
+}
+
+/// 取点遮罩覆盖的显示器：Windows 用光标所在屏的 `rcMonitor`（物理像素，允许负坐标）。
+fn pick_monitor_rect(app: &AppHandle) -> (i32, i32, u32, u32) {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::Foundation::POINT;
+        use windows_sys::Win32::Graphics::Gdi::{
+            GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        };
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GetCursorPos, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
+        };
+
+        let _ = app;
+        unsafe {
+            let mut point = POINT { x: 0, y: 0 };
+            let _ = GetCursorPos(&mut point);
+            let mut info: MONITORINFO = std::mem::zeroed();
+            info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+            let monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
+            if !monitor.is_null() && GetMonitorInfoW(monitor, &mut info) != 0 {
+                let rect = info.rcMonitor;
+                return (
+                    rect.left,
+                    rect.top,
+                    (rect.right - rect.left).max(1) as u32,
+                    (rect.bottom - rect.top).max(1) as u32,
+                );
+            }
+            (
+                0,
+                0,
+                GetSystemMetrics(SM_CXSCREEN).max(1) as u32,
+                GetSystemMetrics(SM_CYSCREEN).max(1) as u32,
+            )
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Ok(Some(monitor)) = app.primary_monitor() {
+            let position = monitor.position();
+            let size = monitor.size();
+            return (
+                position.x,
+                position.y,
+                size.width.max(1),
+                size.height.max(1),
+            );
+        }
+        (0, 0, 1280, 720)
+    }
+}
+
+/// 取点时的全局光标坐标（物理像素）。
+fn pick_cursor_position(app: &AppHandle) -> (i32, i32) {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::Foundation::POINT;
+        use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+        let _ = app;
+        unsafe {
+            let mut point = POINT { x: 0, y: 0 };
+            if GetCursorPos(&mut point) != 0 {
+                (point.x, point.y)
+            } else {
+                (0, 0)
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        app.cursor_position()
+            .map(|position| (position.x.round() as i32, position.y.round() as i32))
+            .unwrap_or((0, 0))
+    }
+}
+
+#[tauri::command]
+fn begin_position_pick(app: AppHandle) -> Result<(), String> {
+    if let Some(existing) = app.get_webview_window(POSITION_PICK_LABEL) {
+        PICKING.store(true, Ordering::SeqCst);
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+
+    PICKING.store(true, Ordering::SeqCst);
+    // Tauri 命令在 WebView2 的 IPC 回调里同步执行；直接 build() 会在等待窗口创建时
+    // 与主线程互等（集成测试实测整机冻结）。这里先返回，再把创建任务排到主线程执行。
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(60));
+        let inner = handle.clone();
+        if let Err(error) = handle.run_on_main_thread(move || {
+            if let Err(error) = create_position_pick_window(&inner) {
+                PICKING.store(false, Ordering::SeqCst);
+                logging::error(format!("打开取点遮罩失败：{error}"));
+                let _ = inner.emit_to("settings", "position-pick-cancelled", ());
+            }
+        }) {
+            // 调度本身失败时也必须解除热键屏蔽，否则用户只能重启应用。
+            PICKING.store(false, Ordering::SeqCst);
+            logging::error(format!("调度取点遮罩失败：{error}"));
+            let _ = app.emit_to("settings", "position-pick-cancelled", ());
+        }
+    });
+    Ok(())
+}
+
+/// 真正创建遮罩窗口；只在主线程调用（`begin_position_pick` 通过
+/// `run_on_main_thread` 排队），避免与 IPC 回调互相等待。
+fn create_position_pick_window(app: &AppHandle) -> Result<(), String> {
+    if let Some(existing) = app.get_webview_window(POSITION_PICK_LABEL) {
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+
+    let (left, top, width, height) = pick_monitor_rect(app);
+
+    let window = WebviewWindowBuilder::new(
+        app,
+        POSITION_PICK_LABEL,
+        WebviewUrl::App(POSITION_PICK_URL.into()),
+    )
+    .title("选择便签位置")
+    .inner_size(320.0, 240.0)
+    .position(0.0, 0.0)
+    .transparent(true)
+    .decorations(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .resizable(false)
+    .shadow(false)
+    .visible(false)
+    .focused(true)
+    .build()
+    .map_err(|error| format!("打开取点遮罩失败：{error}"))?;
+
+    // builder 的尺寸/位置参数是逻辑像素；这里按物理像素精确覆盖显示器。
+    let _ = window.set_position(PhysicalPosition::new(left, top));
+    let _ = window.set_size(PhysicalSize::new(width, height));
+
+    let handle = app.clone();
+    window.on_window_event(move |event| {
+        if let tauri::WindowEvent::Destroyed = event {
+            // 用户用 Alt+F4 等方式直接关掉遮罩时按取消处理；confirm/cancel
+            // 会先把 PICKING 置 false，因此不会重复发事件。
+            if PICKING.swap(false, Ordering::SeqCst) {
+                let _ = handle.emit_to("settings", "position-pick-cancelled", ());
+            }
+        }
+    });
+
+    window
+        .show()
+        .map_err(|error| format!("显示取点遮罩失败：{error}"))?;
+    let _ = window.set_focus();
+    Ok(())
+}
+
+#[tauri::command]
+fn cancel_position_pick(app: AppHandle) -> Result<(), String> {
+    PICKING.store(false, Ordering::SeqCst);
+    if let Some(window) = app.get_webview_window(POSITION_PICK_LABEL) {
+        let _ = window.close();
+    }
+    let _ = app.emit_to("settings", "position-pick-cancelled", ());
+    Ok(())
+}
+
+#[tauri::command]
+fn confirm_position_pick(app: AppHandle) -> Result<(), String> {
+    let (x, y) = pick_cursor_position(&app);
+
+    let mut stored = load_stored_config(&app);
+    stored.window.position_mode = POSITION_MODE_ANCHOR.to_string();
+    stored.window.anchor = ANCHOR_CUSTOM.to_string();
+    stored.window.fixed_x = Some(x);
+    stored.window.fixed_y = Some(y);
+    let stored = normalize_config(stored);
+    if let Err(error) = write_stored_config(&app, &stored) {
+        // 落盘失败也要退出取点态，避免热键一直处于屏蔽状态。
+        PICKING.store(false, Ordering::SeqCst);
+        if let Some(window) = app.get_webview_window(POSITION_PICK_LABEL) {
+            let _ = window.close();
+        }
+        let _ = app.emit_to("settings", "position-pick-cancelled", ());
+        return Err(error);
+    }
+
+    PICKING.store(false, Ordering::SeqCst);
+    if let Some(window) = app.get_webview_window(POSITION_PICK_LABEL) {
+        let _ = window.close();
+    }
+    let _ = app.emit_to("settings", "position-picked", json!({ "x": x, "y": y }));
+
+    // 便签隐藏时显示 800ms 作为取点预览；期间若有正式翻译显示则让位。
+    if let Some(note) = app.get_webview_window("note") {
+        if !note.is_visible().unwrap_or(false) {
+            if let Err(error) = show_note(note.clone()) {
+                logging::error(format!("取点预览显示便签失败：{error}"));
+                return Ok(());
+            }
+            let generation = PREVIEW_GENERATION.load(Ordering::SeqCst);
+            let handle = app.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(PREVIEW_DURATION);
+                if PREVIEW_GENERATION.load(Ordering::SeqCst) != generation {
+                    return;
+                }
+                let restore = handle.clone();
+                let _ = handle.run_on_main_thread(move || {
+                    if PREVIEW_GENERATION.load(Ordering::SeqCst) != generation {
+                        return;
+                    }
+                    if let Some(note) = restore.get_webview_window("note") {
+                        let _ = hide_note(note);
+                    }
+                });
+            });
+        }
     }
 
     Ok(())
@@ -1102,6 +1438,307 @@ fn register_note_move_tracking(app: &AppHandle, stored: &StoredConfig) {
             }
         }
     });
+}
+
+// ---------- 选区直读（SPEC 4.1） ----------
+
+/// 读剪贴板文本：Windows 优先用原生 `CF_UNICODETEXT`（可判断“原本是否文本”），
+/// 其它平台或原生读不到时回退剪贴板插件。
+fn clipboard_read_text(app: &AppHandle) -> Option<String> {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(text) = read_clipboard_text_native() {
+            return Some(text);
+        }
+    }
+    app.clipboard().read_text().ok()
+}
+
+fn source_text_result(
+    text: Option<String>,
+    from_selection: bool,
+    clipboard_restored: bool,
+) -> Result<SourceText, String> {
+    match text {
+        Some(text) if !text.trim().is_empty() => Ok(SourceText {
+            text,
+            from_selection,
+            clipboard_restored,
+        }),
+        _ => Err(EMPTY_CLIPBOARD_ERROR.to_string()),
+    }
+}
+
+#[tauri::command(async)]
+fn read_source_text(app: AppHandle) -> Result<SourceText, String> {
+    let stored = load_stored_config(&app);
+    if !stored.behavior.read_selection {
+        return source_text_result(clipboard_read_text(&app), false, false);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if foreground_is_own_process() {
+            return source_text_result(clipboard_read_text(&app), false, false);
+        }
+        // 热键的修饰键可能还没松开：此时直接发 Ctrl+C 会变成 Ctrl+Alt+C，
+        // 目标窗口不会复制。先等修饰键抬起（最多 120ms）再模拟。
+        wait_for_modifiers_released();
+        let snapshot = clipboard_read_text(&app);
+        read_selection_on_windows(&app, snapshot)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // macOS：本轮不模拟选区复制，行为与 0.3 一致直接读剪贴板。
+        source_text_result(clipboard_read_text(&app), false, false)
+    }
+}
+
+#[cfg(target_os = "windows")]
+const CF_UNICODETEXT_FORMAT: u32 = 13;
+
+#[cfg(target_os = "windows")]
+fn foreground_is_own_process() -> bool {
+    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowThreadProcessId,
+    };
+
+    unsafe {
+        let foreground = GetForegroundWindow();
+        if foreground.is_null() {
+            return false;
+        }
+        let mut process_id: u32 = 0;
+        GetWindowThreadProcessId(foreground, &mut process_id);
+        process_id != 0 && process_id == GetCurrentProcessId()
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn wait_for_modifiers_released() {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    };
+
+    const MAX_WAIT: Duration = Duration::from_millis(120);
+    let started = Instant::now();
+    loop {
+        let pressed = [VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN]
+            .iter()
+            .any(|key| (unsafe { GetAsyncKeyState(*key as i32) } as u16 & 0x8000) != 0);
+        if !pressed || started.elapsed() >= MAX_WAIT {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn read_selection_on_windows(
+    app: &AppHandle,
+    snapshot: Option<String>,
+) -> Result<SourceText, String> {
+    use windows_sys::Win32::System::DataExchange::GetClipboardSequenceNumber;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        keybd_event, KEYEVENTF_KEYUP, VK_C, VK_CONTROL,
+    };
+
+    let sequence = unsafe { GetClipboardSequenceNumber() };
+    // 原剪贴板里有图片/HTML/RTF 等非文本格式时，恢复只会退回纯文本部分，
+    // 按 FR-16 记一条 degraded 日志（不弹窗）。
+    let degraded_restore = clipboard_has_non_text_formats();
+    unsafe {
+        keybd_event(VK_CONTROL as u8, 0, 0, 0);
+        keybd_event(VK_C as u8, 0, 0, 0);
+        keybd_event(VK_C as u8, 0, KEYEVENTF_KEYUP, 0);
+        keybd_event(VK_CONTROL as u8, 0, KEYEVENTF_KEYUP, 0);
+    }
+
+    // 20ms 步长轮询，最长 200ms；命中后立刻读取新文本。
+    let mut changed = false;
+    for _ in 0..10 {
+        std::thread::sleep(Duration::from_millis(20));
+        if unsafe { GetClipboardSequenceNumber() } != sequence {
+            changed = true;
+            break;
+        }
+    }
+
+    let current = clipboard_read_text(app);
+    if changed {
+        if let Some(text) = current.as_deref().filter(|text| !text.trim().is_empty()) {
+            let owner = note_window_hwnd(app);
+            let restored = match snapshot.as_deref() {
+                Some(previous) => {
+                    let restored = write_clipboard_text_native(previous, owner);
+                    if !restored {
+                        logging::error("剪贴板恢复失败，保留选区文本");
+                    } else if degraded_restore {
+                        logging::error("clipboard restore degraded");
+                    }
+                    restored
+                }
+                None => {
+                    logging::info("剪贴板原内容不是文本或读取失败，未恢复");
+                    false
+                }
+            };
+            return Ok(SourceText {
+                text: text.to_string(),
+                from_selection: true,
+                clipboard_restored: restored,
+            });
+        }
+
+        // 复制动作已经改了剪贴板，但选区为空/纯空白：先把原内容恢复回去，
+        // 再回退去读剪贴板（此时读到的就是快照），不能让用户剪贴板被覆盖。
+        if let Some(previous) = snapshot.as_deref() {
+            let owner = note_window_hwnd(app);
+            if !write_clipboard_text_native(previous, owner) {
+                logging::error("选区为空且剪贴板恢复失败");
+            }
+        }
+        return source_text_result(snapshot, false, false);
+    }
+
+    if !changed {
+        // 超时：剪贴板仍应是快照；读取失败时用快照兜底。
+        return source_text_result(current.or(snapshot), false, false);
+    }
+    source_text_result(current, false, false)
+}
+
+/// 取一个本进程窗口句柄：`OpenClipboard(NULL)` 会让 `SetClipboardData` 失败，
+/// 恢复剪贴板时必须关联到真实窗口（SPEC 4.1 的 `clipboard_restored`）。
+#[cfg(target_os = "windows")]
+fn note_window_hwnd(app: &AppHandle) -> Option<windows_sys::Win32::Foundation::HWND> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let window = app.get_webview_window("note")?;
+    match window.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Win32(handle) => Some(handle.hwnd.get() as *mut _),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn open_clipboard_retry(owner: Option<windows_sys::Win32::Foundation::HWND>) -> bool {
+    use windows_sys::Win32::System::DataExchange::OpenClipboard;
+
+    let owner = owner.unwrap_or(std::ptr::null_mut());
+    for attempt in 0..3 {
+        if unsafe { OpenClipboard(owner) } != 0 {
+            return true;
+        }
+        if attempt < 2 {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn read_clipboard_text_native() -> Option<String> {
+    use windows_sys::Win32::System::DataExchange::{
+        CloseClipboard, GetClipboardData, IsClipboardFormatAvailable,
+    };
+    use windows_sys::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+
+    unsafe {
+        if IsClipboardFormatAvailable(CF_UNICODETEXT_FORMAT) == 0 {
+            return None;
+        }
+        if !open_clipboard_retry(None) {
+            return None;
+        }
+        let mut text = None;
+        let handle = GetClipboardData(CF_UNICODETEXT_FORMAT);
+        if !handle.is_null() {
+            let size = GlobalSize(handle);
+            if size >= 2 {
+                let pointer = GlobalLock(handle);
+                if !pointer.is_null() {
+                    let units = std::slice::from_raw_parts(pointer as *const u16, size / 2);
+                    let length = units
+                        .iter()
+                        .position(|unit| *unit == 0)
+                        .unwrap_or(units.len());
+                    text = Some(String::from_utf16_lossy(&units[..length]));
+                    GlobalUnlock(handle);
+                }
+            }
+        }
+        CloseClipboard();
+        text
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn clipboard_has_non_text_formats() -> bool {
+    use windows_sys::Win32::System::DataExchange::{CloseClipboard, EnumClipboardFormats};
+
+    // CF_TEXT(1) / CF_OEMTEXT(7) / CF_UNICODETEXT(13) / CF_LOCALE(16) 视作纯文本。
+    unsafe {
+        if !open_clipboard_retry(None) {
+            return false;
+        }
+        let mut format = EnumClipboardFormats(0);
+        let mut non_text = false;
+        while format != 0 {
+            if !matches!(format, 1 | 7 | 13 | 16) {
+                non_text = true;
+                break;
+            }
+            format = EnumClipboardFormats(format);
+        }
+        CloseClipboard();
+        non_text
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn write_clipboard_text_native(
+    text: &str,
+    owner: Option<windows_sys::Win32::Foundation::HWND>,
+) -> bool {
+    use windows_sys::Win32::Foundation::GlobalFree;
+    use windows_sys::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, SetClipboardData,
+    };
+    use windows_sys::Win32::System::Memory::{
+        GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE,
+    };
+
+    let units: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let bytes = units.len() * std::mem::size_of::<u16>();
+
+    unsafe {
+        let handle = GlobalAlloc(GMEM_MOVEABLE, bytes);
+        if handle.is_null() {
+            return false;
+        }
+        let pointer = GlobalLock(handle);
+        if pointer.is_null() {
+            GlobalFree(handle);
+            return false;
+        }
+        std::ptr::copy_nonoverlapping(units.as_ptr() as *const u8, pointer as *mut u8, bytes);
+        GlobalUnlock(handle);
+
+        if !open_clipboard_retry(owner) {
+            GlobalFree(handle);
+            return false;
+        }
+        let cleared = EmptyClipboard() != 0;
+        let owned = cleared && !SetClipboardData(CF_UNICODETEXT_FORMAT, handle).is_null();
+        CloseClipboard();
+        if !owned {
+            GlobalFree(handle);
+        }
+        owned
+    }
 }
 
 // ---------- 翻译 ----------
@@ -1278,6 +1915,11 @@ fn start_translation(
         match result {
             Ok(Some(translation)) => {
                 let duration_ms = started.elapsed().as_millis() as u64;
+                // 最近翻译：仅成功且非空入列，不受历史开关影响（SPEC 4.5）。
+                if !translation.trim().is_empty() {
+                    push_recent(&translation);
+                    rebuild_tray_menu_async(&app_for_task);
+                }
                 if history.enabled && !translation.is_empty() {
                     let now = chrono::Local::now();
                     let entry = HistoryEntry {
@@ -1422,7 +2064,7 @@ fn clear_history(app: AppHandle) -> Result<Vec<HistoryEntry>, String> {
 // ---------- 托盘与开机自启 ----------
 
 fn set_pause_check(app: &AppHandle, paused: bool) {
-    if let Ok(guard) = app.state::<TrayState>().0.lock() {
+    if let Ok(guard) = app.state::<TrayState>().menu.lock() {
         if let Some(menu) = guard.as_ref() {
             let _ = menu.pause.set_checked(paused);
         }
@@ -1434,7 +2076,7 @@ fn update_pause_check(app: &AppHandle, paused: bool) {
 }
 
 fn set_autostart_check(app: &AppHandle, enabled: bool) {
-    if let Ok(guard) = app.state::<TrayState>().0.lock() {
+    if let Ok(guard) = app.state::<TrayState>().menu.lock() {
         if let Some(menu) = guard.as_ref() {
             let _ = menu.autostart.set_checked(enabled);
         }
@@ -1496,29 +2138,104 @@ fn toggle_hotkey_pause(app: &AppHandle) {
     }
 }
 
-fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    let Some(icon) = app.default_window_icon().cloned() else {
-        return Ok(());
-    };
+// ---------- 最近翻译（SPEC 4.5） ----------
 
-    let paused = app
-        .state::<HotkeyState>()
+fn recent_snapshot() -> Vec<RecentEntry> {
+    RECENT
+        .lock()
+        .map(|entries| entries.iter().cloned().collect())
+        .unwrap_or_default()
+}
+
+fn push_recent(text: &str) {
+    let entry = RecentEntry {
+        at: chrono::Local::now().format("%H:%M").to_string(),
+        text: text.to_string(),
+    };
+    match RECENT.lock() {
+        Ok(mut entries) => {
+            entries.push_front(entry);
+            while entries.len() > RECENT_CAPACITY {
+                entries.pop_back();
+            }
+        }
+        Err(_) => logging::error("最近翻译记录加锁失败"),
+    }
+}
+
+#[tauri::command]
+fn get_recent_translations() -> Vec<RecentEntry> {
+    recent_snapshot()
+}
+
+fn tray_handle(app: &AppHandle) -> Option<TrayIcon<Wry>> {
+    app.state::<TrayState>()
+        .tray
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+}
+
+fn store_tray_menu(app: &AppHandle, pause: CheckMenuItem<Wry>, autostart: CheckMenuItem<Wry>) {
+    if let Ok(mut guard) = app.state::<TrayState>().menu.lock() {
+        *guard = Some(TrayMenu { pause, autostart });
+    }
+}
+
+fn tray_menu_error(error: tauri::Error) -> String {
+    format!("构建托盘菜单失败：{error}")
+}
+
+fn hotkey_paused(app: &AppHandle) -> bool {
+    app.state::<HotkeyState>()
         .0
         .lock()
         .map(|inner| inner.paused)
-        .unwrap_or(false);
+        .unwrap_or(false)
+}
+
+/// 「最近翻译」子菜单：无记录时只有一条禁用项（SPEC 4.5）。
+fn build_recent_submenu(app: &AppHandle) -> Result<Submenu<Wry>, String> {
+    let entries = recent_snapshot();
+    if entries.is_empty() {
+        let empty = MenuItem::with_id(app, "recent-empty", "（暂无记录）", false, None::<&str>)
+            .map_err(tray_menu_error)?;
+        return Submenu::with_items(app, "最近翻译", true, &[&empty]).map_err(tray_menu_error);
+    }
+
+    let mut items = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.iter().enumerate() {
+        let label = format_recent_label(&entry.at, &entry.text);
+        items.push(
+            MenuItem::with_id(app, format!("recent:{index}"), label, true, None::<&str>)
+                .map_err(tray_menu_error)?,
+        );
+    }
+    let refs: Vec<&dyn IsMenuItem<Wry>> = items
+        .iter()
+        .map(|item| item as &dyn IsMenuItem<Wry>)
+        .collect();
+    Submenu::with_items(app, "最近翻译", true, &refs).map_err(tray_menu_error)
+}
+
+struct BuiltTrayMenu {
+    menu: Menu<Wry>,
+    pause: CheckMenuItem<Wry>,
+    autostart: CheckMenuItem<Wry>,
+}
+
+fn build_tray_menu(app: &AppHandle) -> Result<BuiltTrayMenu, String> {
+    let paused = hotkey_paused(app);
     let autostart_enabled = app.autolaunch().is_enabled().unwrap_or(false);
 
-    let translate = MenuItem::with_id(app, "translate", "翻译剪贴板", true, None::<&str>)?;
-    let settings = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
-    let pause = CheckMenuItem::with_id(
-        app,
-        "toggle-pause",
-        "暂停热键",
-        true,
-        paused,
-        None::<&str>,
-    )?;
+    let translate = MenuItem::with_id(app, "translate", "翻译剪贴板", true, None::<&str>)
+        .map_err(tray_menu_error)?;
+    let recent = build_recent_submenu(app)?;
+    let settings =
+        MenuItem::with_id(app, "settings", "设置", true, None::<&str>).map_err(tray_menu_error)?;
+    let pause =
+        CheckMenuItem::with_id(app, "toggle-pause", "暂停热键", true, paused, None::<&str>)
+            .map_err(tray_menu_error)?;
     let autostart = CheckMenuItem::with_id(
         app,
         "toggle-autostart",
@@ -1526,14 +2243,17 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         true,
         autostart_enabled,
         None::<&str>,
-    )?;
-    let separator_one = PredefinedMenuItem::separator(app)?;
-    let separator_two = PredefinedMenuItem::separator(app)?;
-    let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+    )
+    .map_err(tray_menu_error)?;
+    let separator_one = PredefinedMenuItem::separator(app).map_err(tray_menu_error)?;
+    let separator_two = PredefinedMenuItem::separator(app).map_err(tray_menu_error)?;
+    let quit =
+        MenuItem::with_id(app, "quit", "退出", true, None::<&str>).map_err(tray_menu_error)?;
     let menu = Menu::with_items(
         app,
         &[
             &translate,
+            &recent,
             &settings,
             &separator_one,
             &pause,
@@ -1541,26 +2261,118 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             &separator_two,
             &quit,
         ],
-    )?;
+    )
+    .map_err(tray_menu_error)?;
 
-    TrayIconBuilder::new()
+    Ok(BuiltTrayMenu {
+        menu,
+        pause,
+        autostart,
+    })
+}
+
+/// 翻译成功后重建托盘菜单；`set_menu` 必须在主线程执行（SPEC 4.5）。
+fn rebuild_tray_menu_async(app: &AppHandle) {
+    let handle = app.clone();
+    if let Err(error) = app.run_on_main_thread(move || {
+        if let Err(error) = rebuild_tray_menu(&handle) {
+            logging::error(format!("重建最近翻译菜单失败：{error}"));
+        }
+    }) {
+        logging::error(format!("调度托盘菜单重建失败：{error}"));
+    }
+}
+
+fn rebuild_tray_menu(app: &AppHandle) -> Result<(), String> {
+    let tray = tray_handle(app).ok_or_else(|| "托盘尚未初始化".to_string())?;
+    let built = build_tray_menu(app)?;
+    tray.set_menu(Some(built.menu))
+        .map_err(|error| format!("更新托盘菜单失败：{error}"))?;
+    store_tray_menu(app, built.pause, built.autostart);
+    Ok(())
+}
+
+fn set_tray_tooltip(app: &AppHandle, tooltip: Option<&str>) {
+    if let Some(tray) = tray_handle(app) {
+        let _ = tray.set_tooltip(tooltip);
+    }
+}
+
+/// 点击最近翻译后把 tooltip 改成「已复制：…」，3 秒后恢复默认（无 tooltip）。
+fn flash_tray_tooltip(app: &AppHandle, message: String) {
+    let generation = TRAY_TOOLTIP_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    set_tray_tooltip(app, Some(&message));
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(TRAY_TOOLTIP_DURATION);
+        if TRAY_TOOLTIP_GENERATION.load(Ordering::SeqCst) != generation {
+            return;
+        }
+        let restore = handle.clone();
+        let _ = handle.run_on_main_thread(move || {
+            if TRAY_TOOLTIP_GENERATION.load(Ordering::SeqCst) == generation {
+                set_tray_tooltip(&restore, None);
+            }
+        });
+    });
+}
+
+fn copy_recent_entry(app: &AppHandle, index: usize) {
+    let Some(entry) = recent_snapshot().get(index).cloned() else {
+        return;
+    };
+    match app.clipboard().write_text(entry.text.clone()) {
+        Ok(()) => {
+            let preview = preview_text(&entry.text);
+            flash_tray_tooltip(app, format!("已复制：{preview}"));
+            logging::info(format!("recent translation copied: index={index}"));
+        }
+        Err(error) => logging::error(format!("复制最近翻译失败：{error}")),
+    }
+}
+
+fn handle_tray_menu_event(app: &AppHandle, event: MenuEvent) {
+    let id = event.id.as_ref();
+    if let Some(index) = id.strip_prefix("recent:") {
+        if let Ok(index) = index.parse::<usize>() {
+            copy_recent_entry(app, index);
+        }
+        return;
+    }
+
+    match id {
+        "translate" => {
+            // 取点期间忽略「翻译剪贴板」（SPEC 4.4）。
+            if PICKING.load(Ordering::SeqCst) {
+                return;
+            }
+            let _ = app.emit_to("note", "hotkey-pressed", ());
+        }
+        "settings" => {
+            if let Err(error) = open_settings(app.clone()) {
+                logging::error(format!("open settings from tray failed: {error}"));
+            }
+        }
+        "toggle-pause" => toggle_hotkey_pause(app),
+        "toggle-autostart" => toggle_autostart(app),
+        "quit" => app.exit(0),
+        _ => {}
+    }
+}
+
+fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(icon) = app.default_window_icon().cloned() else {
+        return Ok(());
+    };
+
+    let handle = app.handle();
+    let built = build_tray_menu(handle)?;
+
+    let tray = TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
-        .menu(&menu)
+        .menu(&built.menu)
         .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| match event.id.as_ref() {
-            "translate" => {
-                let _ = app.emit_to("note", "hotkey-pressed", ());
-            }
-            "settings" => {
-                if let Err(error) = open_settings(app.clone()) {
-                    logging::error(format!("open settings from tray failed: {error}"));
-                }
-            }
-            "toggle-pause" => toggle_hotkey_pause(app),
-            "toggle-autostart" => toggle_autostart(app),
-            "quit" => app.exit(0),
-            _ => {}
-        })
+        .on_menu_event(|app, event| handle_tray_menu_event(app, event))
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
@@ -1575,9 +2387,10 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         })
         .build(app)?;
 
-    if let Ok(mut guard) = app.state::<TrayState>().0.lock() {
-        *guard = Some(TrayMenu { pause, autostart });
+    if let Ok(mut guard) = app.state::<TrayState>().tray.lock() {
+        *guard = Some(tray);
     }
+    store_tray_menu(handle, built.pause, built.autostart);
 
     Ok(())
 }
@@ -1597,6 +2410,10 @@ pub fn run() {
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| {
                     if event.state == ShortcutState::Pressed {
+                        // 取点期间屏蔽全局热键（SPEC 4.4）。
+                        if PICKING.load(Ordering::SeqCst) {
+                            return;
+                        }
                         let _ = app.emit_to("note", "hotkey-pressed", ());
                     }
                 })
@@ -1621,11 +2438,18 @@ pub fn run() {
             get_history,
             delete_history,
             clear_history,
+            get_recent_translations,
             open_settings,
             close_settings,
             quit_app,
             show_note,
             hide_note,
+            read_source_text,
+            set_note_size,
+            set_note_pinned,
+            begin_position_pick,
+            cancel_position_pick,
+            confirm_position_pick,
             start_translation,
             test_connection,
             check_update,
@@ -1646,6 +2470,16 @@ pub fn run() {
 
             register_initial_hotkey(&handle, &stored);
             register_note_move_tracking(&handle, &stored);
+
+            // 恢复上次拖拽保存的便签尺寸（AC-28）；窗口在 tauri.conf 里是固定的 420×360。
+            if let Some(note) = app.get_webview_window("note") {
+                let (width, height) =
+                    clamp_note_size(stored.window.note_width, stored.window.note_height);
+                if let Err(error) = note.set_size(LogicalSize::new(width, height)) {
+                    logging::error(format!("恢复便签尺寸失败：{error}"));
+                }
+            }
+
             let _ = setup_tray(app);
 
             if let Some(settings) = app.get_webview_window("settings") {

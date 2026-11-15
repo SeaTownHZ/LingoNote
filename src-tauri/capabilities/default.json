@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "LingoNote default capabilities",
-  "windows": ["note", "settings"],
+  "windows": ["note", "settings", "position-pick"],
   "permissions": [
     "core:default",
     "core:event:default",

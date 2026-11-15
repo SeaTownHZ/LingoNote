@@ -1,3 +1,5 @@
+import "./settings-extra.css";
+
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ask, open, save } from "@tauri-apps/plugin-dialog";
@@ -24,7 +26,8 @@ type Anchor =
   | "center-right"
   | "bottom-left"
   | "bottom-center"
-  | "bottom-right";
+  | "bottom-right"
+  | "custom";
 
 interface WindowConfig {
   position_mode: PositionMode;
@@ -34,6 +37,32 @@ interface WindowConfig {
   /** 记住上次位置时由 Rust 写入；设置页保存时发送 null，交给 Rust 保留旧值。 */
   last_x: number | null;
   last_y: number | null;
+  /** 便签尺寸（便签页拖拽后由 Rust 持久化）；设置页只原样带回。 */
+  note_width: number;
+  note_height: number;
+  /** 是否钉住；设置页只原样带回。 */
+  pinned: boolean;
+  /** 取点得到的左上角物理坐标；null 表示未取点。 */
+  fixed_x: number | null;
+  fixed_y: number | null;
+}
+
+/**
+ * 后端返回的 window 字段：0.3 的配置没有 M4 新字段，
+ * 这里按可选处理，读取后统一归一化再写回。
+ */
+interface StoredWindowConfig {
+  position_mode?: string;
+  anchor?: string;
+  margin_x?: number;
+  margin_y?: number;
+  last_x?: number | null;
+  last_y?: number | null;
+  note_width?: number;
+  note_height?: number;
+  pinned?: boolean;
+  fixed_x?: number | null;
+  fixed_y?: number | null;
 }
 
 interface BehaviorConfig {
@@ -44,6 +73,10 @@ interface BehaviorConfig {
   max_chars: number;
   /** 启动时检查更新；旧配置缺该字段时后端按 true 返回。 */
   check_updates: boolean;
+  /** 优先读取选中文本（自动复制后恢复剪贴板）；旧配置缺该字段按 true。 */
+  read_selection: boolean;
+  /** 便签显示译文时再次按热键＝复制并关闭；旧配置缺该字段按 true。 */
+  double_press_copies: boolean;
 }
 
 interface HistoryConfig {
@@ -64,7 +97,7 @@ interface ConfigView {
   hotkey: string;
   ui: UiConfig;
   behavior: BehaviorConfig;
-  window: WindowConfig;
+  window: StoredWindowConfig;
   prompt: string;
   default_prompt: string;
   history: HistoryConfig;
@@ -130,17 +163,25 @@ const el = <T extends HTMLElement = HTMLElement>(id: string): T => {
 // 通用
 const hotkeyInput = el<HTMLInputElement>("hotkey");
 const applyHotkeyBtn = el<HTMLButtonElement>("apply-hotkey");
+const recordHotkeyBtn = el<HTMLButtonElement>("record-hotkey");
 const hotkeyResult = el<HTMLSpanElement>("hotkey-result");
 const pauseHotkey = el<HTMLInputElement>("pause-hotkey");
 const targetLanguage = el<HTMLInputElement>("target-language");
 const hideOnBlur = el<HTMLInputElement>("hide-on-blur");
 const appearFocused = el<HTMLInputElement>("appear-focused");
 const copyRestores = el<HTMLInputElement>("copy-restores");
+const readSelection = el<HTMLInputElement>("read-selection");
+const doublePressCopies = el<HTMLInputElement>("double-press-copies");
 const checkUpdatesToggle = el<HTMLInputElement>("check-updates");
 const positionMode = el<HTMLSelectElement>("position-mode");
 const anchor = el<HTMLSelectElement>("anchor");
 const marginX = el<HTMLInputElement>("margin-x");
 const marginY = el<HTMLInputElement>("margin-y");
+const marginFields = el<HTMLDivElement>("margin-fields");
+const customPosition = el<HTMLDivElement>("position-custom");
+const pickPositionBtn = el<HTMLButtonElement>("pick-position");
+const pickedPosition = el<HTMLSpanElement>("picked-position");
+const clearPositionBtn = el<HTMLButtonElement>("clear-position");
 const positionHint = el<HTMLParagraphElement>("position-hint");
 const autostart = el<HTMLInputElement>("autostart");
 
@@ -267,6 +308,11 @@ let saveChain: Promise<boolean> = Promise.resolve(true);
 let suppressAutosave = false;
 let latestUpdate: UpdateInfo | null = null;
 let updateRequestSeq = 0;
+/** 热键录制态：仅录制时拦截 keydown，其余时间输入框照常可编辑/粘贴。 */
+let recordingHotkey = false;
+let hotkeyBeforeRecord = "";
+/** 整页重新填充配置时递增，用于丢弃过期的镜像刷新结果。 */
+let configGeneration = 0;
 
 const POSITION_MODES: PositionMode[] = ["cursor", "anchor", "remember"];
 const ANCHORS: Anchor[] = [
@@ -279,6 +325,7 @@ const ANCHORS: Anchor[] = [
   "bottom-left",
   "bottom-center",
   "bottom-right",
+  "custom",
 ];
 const DEFAULT_WINDOW_CONFIG: WindowConfig = {
   position_mode: "cursor",
@@ -287,7 +334,17 @@ const DEFAULT_WINDOW_CONFIG: WindowConfig = {
   margin_y: 16,
   last_x: null,
   last_y: null,
+  note_width: 420,
+  note_height: 360,
+  pinned: false,
+  fixed_x: null,
+  fixed_y: null,
 };
+/**
+ * 后端 window 配置的本地镜像。note_width/note_height/pinned/fixed_x/y 设置页不直接编辑，
+ * 但自动保存时必须原样带回，否则会把拖拽尺寸、钉住状态、已取点清掉。
+ */
+let currentWindow: WindowConfig = { ...DEFAULT_WINDOW_CONFIG };
 
 function normalizePositionMode(value: string | undefined): PositionMode {
   return POSITION_MODES.includes(value as PositionMode) ? (value as PositionMode) : "cursor";
@@ -295,6 +352,45 @@ function normalizePositionMode(value: string | undefined): PositionMode {
 
 function normalizeAnchor(value: string | undefined): Anchor {
   return ANCHORS.includes(value as Anchor) ? (value as Anchor) : "bottom-right";
+}
+
+function normalizeNullableInt(value: number | null | undefined): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  return Math.round(value);
+}
+
+/**
+ * SPEC §3：anchor="custom" 但缺少取点坐标时回退右下角（与 Rust 归一化一致）。
+ * 读取旧配置、清除取点后都走这里。
+ */
+function normalizeWindowAnchor(
+  value: string | undefined,
+  fixedX: number | null,
+  fixedY: number | null,
+): Anchor {
+  const resolved = normalizeAnchor(value);
+  if (resolved === "custom" && (fixedX === null || fixedY === null)) return "bottom-right";
+  return resolved;
+}
+
+/** 把后端 window 字段（0.3 的配置可能缺新字段）归一化成完整的本地镜像。 */
+function acceptWindowConfig(value: StoredWindowConfig | null | undefined): WindowConfig {
+  const source = value ?? {};
+  const fixedX = normalizeNullableInt(source.fixed_x);
+  const fixedY = normalizeNullableInt(source.fixed_y);
+  return {
+    position_mode: normalizePositionMode(source.position_mode),
+    anchor: normalizeWindowAnchor(source.anchor, fixedX, fixedY),
+    margin_x: normalizeNumber(source.margin_x, 16, 0, 400),
+    margin_y: normalizeNumber(source.margin_y, 16, 0, 400),
+    last_x: normalizeNullableInt(source.last_x),
+    last_y: normalizeNullableInt(source.last_y),
+    note_width: normalizeNumber(source.note_width, 420, 320, 900),
+    note_height: normalizeNumber(source.note_height, 360, 220, 900),
+    pinned: source.pinned === true,
+    fixed_x: fixedX,
+    fixed_y: fixedY,
+  };
 }
 
 function normalizeNumber(
@@ -319,16 +415,37 @@ function clampFloat(input: HTMLInputElement, fallback: number, min: number, max:
   return Math.round(Math.min(max, Math.max(min, value)) * 100) / 100;
 }
 
-/** 非 anchor 模式禁用锚点/边距，并按模式给出提示。 */
+/** 取点状态行：未取点 / 已取点：x, y。 */
+function renderPickedPosition() {
+  const hasPoint = currentWindow.fixed_x !== null && currentWindow.fixed_y !== null;
+  pickedPosition.textContent = hasPoint
+    ? `已取点：${currentWindow.fixed_x}, ${currentWindow.fixed_y}`
+    : "未取点";
+  pickedPosition.classList.toggle("ok", hasPoint);
+  pickedPosition.classList.remove("err");
+  clearPositionBtn.disabled = !hasPoint;
+}
+
+/** 非 anchor 模式禁用锚点/边距，并按模式给出提示；custom 锚点切换到取点行。 */
 function updatePositionUi() {
   const mode = normalizePositionMode(positionMode.value);
   const anchored = mode === "anchor";
   anchor.disabled = !anchored;
   marginX.disabled = !anchored;
   marginY.disabled = !anchored;
+
+  const custom = anchored && normalizeAnchor(anchor.value) === "custom";
+  // 自定义位置不需要边距；取点行只在“固定位置 + 自定义”时出现。
+  marginFields.classList.toggle("hidden", custom);
+  customPosition.classList.toggle("hidden", !custom);
+  renderPickedPosition();
+
   if (mode === "remember") {
     positionHint.textContent = "拖动便签后会自动记住位置；位置越界时会被夹回工作区。";
-  } else if (mode === "anchor") {
+  } else if (custom) {
+    positionHint.textContent =
+      "点「在屏幕上取点」，然后在屏幕上单击；便签左上角会落在该点，越界时夹回工作区。";
+  } else if (anchored) {
     positionHint.textContent = "锚点以光标所在显示器的工作区为准，边距是到工作区边缘的距离。";
   } else {
     positionHint.textContent = "便签出现在光标右下角 12px；空间不足时自动翻转。";
@@ -389,6 +506,8 @@ function collect(): ConfigInput {
       pause_hotkey: pauseHotkey.checked,
       max_chars: clampInt(maxChars, 20_000, 1_000, 100_000),
       check_updates: checkUpdatesToggle.checked,
+      read_selection: readSelection.checked,
+      double_press_copies: doublePressCopies.checked,
     },
     window: {
       position_mode: normalizePositionMode(positionMode.value),
@@ -398,6 +517,12 @@ function collect(): ConfigInput {
       // 设置页不负责记录坐标：发送 null，由 Rust 保留磁盘上已有的 last_x/last_y。
       last_x: null,
       last_y: null,
+      // 以下字段设置页只做镜像：未修改时原样带回，避免自动保存清掉尺寸/钉住/取点。
+      note_width: currentWindow.note_width,
+      note_height: currentWindow.note_height,
+      pinned: currentWindow.pinned,
+      fixed_x: currentWindow.fixed_x,
+      fixed_y: currentWindow.fixed_y,
     },
     prompt: { system: currentPromptForSave() },
     history: { enabled: historyEnabled.checked, limit: 200 },
@@ -457,6 +582,36 @@ function showWarning(message: string | null) {
   warningBox.classList.remove("hidden");
 }
 
+/**
+ * 外部改动（便签钉住 / 拖拽改尺寸）只同步镜像字段，
+ * 不覆盖设置页里正在编辑的控件值。
+ */
+function applyWindowMirror(value: StoredWindowConfig | null | undefined) {
+  const fresh = acceptWindowConfig(value);
+  currentWindow = {
+    ...currentWindow,
+    note_width: fresh.note_width,
+    note_height: fresh.note_height,
+    pinned: fresh.pinned,
+    fixed_x: fresh.fixed_x,
+    fixed_y: fresh.fixed_y,
+  };
+}
+
+/** 重新读后端配置刷新镜像，避免自动保存把便签侧刚改的尺寸/钉住状态覆盖回去。 */
+async function refreshWindowMirror() {
+  const generation = configGeneration;
+  try {
+    const config = await invoke<ConfigView>("get_config");
+    // 期间整页重新填充过（导入/恢复默认）→ 丢弃这次过期结果。
+    if (generation !== configGeneration) return;
+    applyWindowMirror(config.window);
+    renderPickedPosition();
+  } catch {
+    // 读不到就保留本地镜像；下一次自动保存会带回已知值。
+  }
+}
+
 function updatePromptHint() {
   const isDefault =
     promptArea.value.trim() === "" || promptArea.value.trim() === defaultPrompt.trim();
@@ -472,6 +627,7 @@ function inferPreset(): string {
 
 function fillConfig(config: ConfigView, status: HotkeyStatus) {
   suppressAutosave = true;
+  configGeneration += 1;
   try {
     baseUrl.value = config.base_url || "https://api.deepseek.com/v1";
     model.value = config.model || "deepseek-chat";
@@ -496,11 +652,11 @@ function fillConfig(config: ConfigView, status: HotkeyStatus) {
     opacity.value = String(normalizeNumber(config.ui.opacity, 100, 80, 100));
 
     // 老版本后端可能还没有 window 字段，这里按默认值兜底。
-    const windowConfig = config.window ?? DEFAULT_WINDOW_CONFIG;
-    positionMode.value = normalizePositionMode(windowConfig.position_mode);
-    anchor.value = normalizeAnchor(windowConfig.anchor);
-    marginX.value = String(normalizeNumber(windowConfig.margin_x, 16, 0, 400));
-    marginY.value = String(normalizeNumber(windowConfig.margin_y, 16, 0, 400));
+    currentWindow = acceptWindowConfig(config.window);
+    positionMode.value = currentWindow.position_mode;
+    anchor.value = currentWindow.anchor;
+    marginX.value = String(currentWindow.margin_x);
+    marginY.value = String(currentWindow.margin_y);
     updatePositionUi();
 
     applyPreview();
@@ -511,6 +667,9 @@ function fillConfig(config: ConfigView, status: HotkeyStatus) {
     pauseHotkey.checked = status.paused;
     maxChars.value = String(config.behavior.max_chars || 20_000);
     checkUpdatesToggle.checked = config.behavior.check_updates !== false;
+    // M4 新开关：旧配置缺字段时后端按 true 返回，这里同样兜底为勾选。
+    readSelection.checked = config.behavior.read_selection !== false;
+    doublePressCopies.checked = config.behavior.double_press_copies !== false;
 
     historyEnabled.checked = config.history.enabled;
     loggingEnabled.checked = config.logging.enabled;
@@ -525,7 +684,8 @@ function fillConfig(config: ConfigView, status: HotkeyStatus) {
 }
 
 function applyHotkeyStatus(status: HotkeyStatus) {
-  hotkeyInput.value = status.hotkey;
+  // 录制中不要被外部状态刷新打断输入框内容。
+  if (!recordingHotkey) hotkeyInput.value = status.hotkey;
   pauseHotkey.checked = status.paused;
   if (status.error) {
     setResult(hotkeyResult, status.error, "err");
@@ -534,6 +694,118 @@ function applyHotkeyStatus(status: HotkeyStatus) {
   } else {
     setResult(hotkeyResult, "当前热键已生效", "ok");
   }
+}
+
+// ---------- 热键录制（FR-17） ----------
+
+const HOTKEY_PLACEHOLDER = "Alt+Q";
+const RECORD_PLACEHOLDER = "请按下组合键…";
+const MODIFIER_CODES = new Set([
+  "ControlLeft",
+  "ControlRight",
+  "AltLeft",
+  "AltRight",
+  "ShiftLeft",
+  "ShiftRight",
+]);
+/** event.code → 规范主键名（后端 global-hotkey 解析器接受的名字）。 */
+const NAMED_KEY_CODES: Record<string, string> = {
+  Space: "Space",
+  Tab: "Tab",
+  Enter: "Enter",
+  Home: "Home",
+  End: "End",
+  PageUp: "PageUp",
+  PageDown: "PageDown",
+  Insert: "Insert",
+  Delete: "Delete",
+  ArrowUp: "ArrowUp",
+  ArrowDown: "ArrowDown",
+  ArrowLeft: "ArrowLeft",
+  ArrowRight: "ArrowRight",
+};
+
+/** 用 event.code 取主键名；不认识的键返回 null（由调用方提示并忽略）。 */
+function mainKeyFromCode(code: string): string | null {
+  const letter = /^Key([A-Z])$/.exec(code);
+  if (letter) return letter[1];
+  const digit = /^Digit([0-9])$/.exec(code);
+  if (digit) return digit[1];
+  const func = /^F([1-9]|1[0-2])$/.exec(code);
+  if (func) return `F${func[1]}`;
+  return NAMED_KEY_CODES[code] ?? null;
+}
+
+/** 修饰键按 Ctrl→Alt→Shift→主键 的顺序拼成规范字符串。 */
+function formatHotkey(event: KeyboardEvent, mainKey: string): string {
+  const parts: string[] = [];
+  if (event.ctrlKey) parts.push("Ctrl");
+  if (event.altKey) parts.push("Alt");
+  if (event.shiftKey) parts.push("Shift");
+  parts.push(mainKey);
+  return parts.join("+");
+}
+
+function setRecordingUi(active: boolean) {
+  hotkeyInput.readOnly = active;
+  hotkeyInput.classList.toggle("recording", active);
+  recordHotkeyBtn.textContent = active ? "取消" : "录制";
+  recordHotkeyBtn.classList.toggle("recording", active);
+  if (!active) hotkeyInput.placeholder = HOTKEY_PLACEHOLDER;
+}
+
+function startHotkeyRecording() {
+  if (recordingHotkey) return;
+  recordingHotkey = true;
+  hotkeyBeforeRecord = hotkeyInput.value;
+  hotkeyInput.value = "";
+  hotkeyInput.placeholder = RECORD_PLACEHOLDER;
+  setRecordingUi(true);
+  setResult(hotkeyResult, "请按下组合键（至少含 Ctrl / Alt / Shift 之一），Esc 取消", "");
+  hotkeyInput.focus();
+}
+
+/** 退出录制态；message 为 null 表示保留状态行交给后续应用流程。 */
+function stopHotkeyRecording(message: string | null, kind: "ok" | "err" | "" = "") {
+  if (!recordingHotkey) return;
+  recordingHotkey = false;
+  setRecordingUi(false);
+  if (message !== null) setResult(hotkeyResult, message, kind);
+}
+
+function cancelHotkeyRecording() {
+  if (!recordingHotkey) return;
+  const previous = hotkeyBeforeRecord;
+  stopHotkeyRecording("已取消录制", "");
+  hotkeyInput.value = previous;
+}
+
+/** 与「应用热键」按钮共用的注册链路：失败时旧热键仍生效。 */
+async function applyHotkey(): Promise<void> {
+  const value = hotkeyInput.value.trim();
+  if (!value) {
+    setResult(hotkeyResult, "热键不能为空", "err");
+    return;
+  }
+  applyHotkeyBtn.disabled = true;
+  recordHotkeyBtn.disabled = true;
+  setResult(hotkeyResult, "应用中…", "");
+  try {
+    const status = await invoke<HotkeyStatus>("set_hotkey", { hotkey: value });
+    applyHotkeyStatus(status);
+    setSaveHint(status.paused ? "已保存热键；当前处于暂停状态" : "热键已生效");
+  } catch (error) {
+    setResult(hotkeyResult, `应用失败：${String(error)}（旧热键仍生效）`, "err");
+  } finally {
+    applyHotkeyBtn.disabled = false;
+    recordHotkeyBtn.disabled = false;
+  }
+}
+
+async function commitHotkeyRecording(combo: string) {
+  stopHotkeyRecording(null);
+  hotkeyInput.value = combo;
+  await applyHotkey();
 }
 
 function applyTheme(name: string) {
@@ -831,7 +1103,10 @@ positionMode.addEventListener("change", () => {
   scheduleSave();
 });
 
-anchor.addEventListener("change", () => scheduleSave());
+anchor.addEventListener("change", () => {
+  updatePositionUi();
+  scheduleSave();
+});
 
 for (const input of [marginX, marginY]) {
   input.addEventListener("input", () => scheduleSave());
@@ -844,7 +1119,15 @@ for (const input of [baseUrl, model, targetLanguage, maxChars, promptArea]) {
   });
 }
 
-for (const input of [hideOnBlur, appearFocused, copyRestores, checkUpdatesToggle, loggingEnabled]) {
+for (const input of [
+  hideOnBlur,
+  appearFocused,
+  copyRestores,
+  readSelection,
+  doublePressCopies,
+  checkUpdatesToggle,
+  loggingEnabled,
+]) {
   input.addEventListener("change", () => scheduleSave());
 }
 
@@ -883,20 +1166,70 @@ resetAppearanceBtn.addEventListener("click", () => {
   scheduleSave();
 });
 
-applyHotkeyBtn.addEventListener("click", async () => {
-  applyHotkeyBtn.disabled = true;
-  setResult(hotkeyResult, "应用中…", "");
-  try {
-    const status = await invoke<HotkeyStatus>("set_hotkey", {
-      hotkey: hotkeyInput.value.trim(),
-    });
-    applyHotkeyStatus(status);
-    setSaveHint(status.paused ? "已保存热键；当前处于暂停状态" : "热键已生效");
-  } catch (error) {
-    setResult(hotkeyResult, String(error), "err");
-  } finally {
-    applyHotkeyBtn.disabled = false;
+applyHotkeyBtn.addEventListener("click", () => void applyHotkey());
+
+// 录制按钮：按下时阻止输入框失焦，避免「失焦取消」把点击切换吃成重新开始录制。
+recordHotkeyBtn.addEventListener("mousedown", (event) => event.preventDefault());
+recordHotkeyBtn.addEventListener("click", () => {
+  if (recordingHotkey) cancelHotkeyRecording();
+  else startHotkeyRecording();
+});
+
+hotkeyInput.addEventListener("keydown", (event) => {
+  if (!recordingHotkey) return;
+  // 录制期间吞掉按键，避免触发页面快捷键 / Esc 关窗。
+  event.preventDefault();
+  event.stopPropagation();
+
+  if (event.code === "Escape" || event.key === "Escape") {
+    cancelHotkeyRecording();
+    return;
   }
+  if (event.metaKey || event.code === "MetaLeft" || event.code === "MetaRight") {
+    setResult(hotkeyResult, "不支持 Win 键组合，请改用 Ctrl / Alt / Shift", "err");
+    return;
+  }
+  if (MODIFIER_CODES.has(event.code)) {
+    // 纯修饰键只是组合的过程，提示继续按主键即可。
+    setResult(hotkeyResult, "继续按住修饰键，再按一个主键", "");
+    return;
+  }
+  if (!event.ctrlKey && !event.altKey && !event.shiftKey) {
+    setResult(hotkeyResult, "需要至少一个修饰键（Ctrl / Alt / Shift）", "err");
+    return;
+  }
+  const mainKey = mainKeyFromCode(event.code);
+  if (!mainKey) {
+    setResult(hotkeyResult, "这个键不支持录制，请换一个主键", "err");
+    return;
+  }
+  void commitHotkeyRecording(formatHotkey(event, mainKey));
+});
+
+// 点击输入框以外的区域 → 取消录制并恢复原值。
+hotkeyInput.addEventListener("blur", () => cancelHotkeyRecording());
+
+pickPositionBtn.addEventListener("click", async () => {
+  pickPositionBtn.disabled = true;
+  setResult(pickedPosition, "正在打开取点遮罩…", "");
+  try {
+    await invoke("begin_position_pick");
+    setResult(pickedPosition, "取点中：在屏幕上单击目标位置，Esc 取消", "");
+  } catch (error) {
+    setResult(pickedPosition, `无法进入取点：${String(error)}`, "err");
+  } finally {
+    pickPositionBtn.disabled = false;
+  }
+});
+
+clearPositionBtn.addEventListener("click", () => {
+  currentWindow.fixed_x = null;
+  currentWindow.fixed_y = null;
+  // 没有取点坐标时 custom 无意义，回到默认右下角（与 Rust 归一化一致）。
+  if (normalizeAnchor(anchor.value) === "custom") anchor.value = "bottom-right";
+  updatePositionUi();
+  setSaveHint("已清除取点");
+  scheduleSave();
 });
 
 pauseHotkey.addEventListener("change", async () => {
@@ -1060,6 +1393,29 @@ void listen<HotkeyStatus>("hotkey-changed", (event) => applyHotkeyStatus(event.p
 void listen<boolean>("autostart-changed", (event) => {
   autostart.checked = event.payload;
 });
+
+// 取点结果：Rust 已写入 anchor=custom 与 fixed_x/fixed_y，这里只更新本地镜像与状态行。
+void listen<{ x: number; y: number }>("position-picked", (event) => {
+  const x = normalizeNullableInt(event.payload?.x);
+  const y = normalizeNullableInt(event.payload?.y);
+  if (x === null || y === null) return;
+  currentWindow.fixed_x = x;
+  currentWindow.fixed_y = y;
+  currentWindow.anchor = "custom";
+  anchor.value = "custom";
+  updatePositionUi();
+  setSaveHint("已取点，位置已保存");
+});
+
+void listen("position-pick-cancelled", () => {
+  // 取消时配置不变：状态行保留旧值，没取过点则显示「未取点」。
+  renderPickedPosition();
+  setSaveHint("已取消取点，位置未改变");
+});
+
+// 便签侧钉住会 emit config-changed；回到设置页时也重读一次，避免旧镜像覆盖尺寸/钉住。
+void listen("config-changed", () => void refreshWindowMirror());
+window.addEventListener("focus", () => void refreshWindowMirror());
 
 void load().catch((error) => {
   setSaveHint(`读取配置失败：${String(error)}`, true);

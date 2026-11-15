@@ -612,3 +612,290 @@ fn config_view_serializes_check_updates() {
     assert_eq!(value["behavior"]["check_updates"], Value::from(false));
     assert_eq!(value["behavior"]["hide_on_blur"], Value::from(true));
 }
+
+// ---------- M4：配置增量（SPEC 3） ----------
+
+#[test]
+fn m4_config_defaults_cover_note_and_selection_fields() {
+    let config = StoredConfig::default();
+    assert!(config.behavior.read_selection);
+    assert!(config.behavior.double_press_copies);
+    assert_eq!(config.window.note_width, DEFAULT_NOTE_WIDTH);
+    assert_eq!(config.window.note_height, DEFAULT_NOTE_HEIGHT);
+    assert_eq!(config.window.note_width, 420);
+    assert_eq!(config.window.note_height, 360);
+    assert!(!config.window.pinned);
+    assert_eq!(config.window.fixed_x, None);
+    assert_eq!(config.window.fixed_y, None);
+
+    // 旧 v2 配置（缺少新增字段）反序列化后取默认值。
+    let legacy: StoredConfig = serde_json::from_str(
+        r#"{
+            "schema_version": 2,
+            "base_url": "https://api.deepseek.com/v1",
+            "model": "deepseek-chat",
+            "behavior": {"hide_on_blur": false},
+            "window": {"position_mode": "anchor", "anchor": "top-left"}
+        }"#,
+    )
+    .unwrap();
+    assert!(!legacy.behavior.hide_on_blur);
+    assert!(legacy.behavior.read_selection);
+    assert!(legacy.behavior.double_press_copies);
+    assert_eq!(legacy.window.note_width, DEFAULT_NOTE_WIDTH);
+    assert_eq!(legacy.window.note_height, DEFAULT_NOTE_HEIGHT);
+    assert!(!legacy.window.pinned);
+    assert_eq!(legacy.window.fixed_x, None);
+    assert_eq!(legacy.window.fixed_y, None);
+}
+
+#[test]
+fn m4_custom_anchor_requires_fixed_point() {
+    let mut config = StoredConfig::default();
+    config.window.anchor = "CUSTOM".into();
+    config.window.fixed_x = Some(1280);
+    config.window.fixed_y = Some(-40);
+    let normalized = normalize_config(config);
+    assert_eq!(normalized.window.anchor, ANCHOR_CUSTOM);
+    assert_eq!(normalized.window.fixed_x, Some(1280));
+    assert_eq!(normalized.window.fixed_y, Some(-40));
+
+    // 任一坐标缺失 → 回退 bottom-right，不报错。
+    let mut missing_x = StoredConfig::default();
+    missing_x.window.anchor = "custom".into();
+    missing_x.window.fixed_y = Some(10);
+    let normalized = normalize_config(missing_x);
+    assert_eq!(normalized.window.anchor, DEFAULT_ANCHOR);
+    assert_eq!(normalized.window.fixed_y, Some(10));
+
+    let mut missing_y = StoredConfig::default();
+    missing_y.window.anchor = "custom".into();
+    missing_y.window.fixed_x = Some(10);
+    assert_eq!(normalize_config(missing_y).window.anchor, DEFAULT_ANCHOR);
+
+    let mut missing_both = StoredConfig::default();
+    missing_both.window.anchor = "custom".into();
+    assert_eq!(normalize_config(missing_both).window.anchor, DEFAULT_ANCHOR);
+
+    // custom 不是九宫格锚点：位置计算时同样按 bottom-right 处理。
+    let work = WorkArea::new(0, 0, 1200, 900);
+    let expected = anchor_position(DEFAULT_ANCHOR, (300, 200), work, (16, 16));
+    assert_eq!(
+        anchor_position(ANCHOR_CUSTOM, (300, 200), work, (16, 16)),
+        expected
+    );
+}
+
+#[test]
+fn m4_note_size_is_clamped_to_spec_range() {
+    assert_eq!(clamp_note_size(100, 100), (320, 220));
+    assert_eq!(clamp_note_size(5000, 5000), (900, 900));
+    assert_eq!(clamp_note_size(600, 500), (600, 500));
+    assert_eq!(clamp_note_size(NOTE_MIN_WIDTH, NOTE_MAX_HEIGHT), (320, 900));
+
+    let mut config = StoredConfig::default();
+    config.window.note_width = 10;
+    config.window.note_height = 10_000;
+    let normalized = normalize_config(config);
+    assert_eq!(normalized.window.note_width, NOTE_MIN_WIDTH);
+    assert_eq!(normalized.window.note_height, NOTE_MAX_HEIGHT);
+}
+
+#[test]
+fn m4_config_input_deserializes_new_window_and_behavior_fields() {
+    let input: ConfigInput = serde_json::from_str(
+        r#"{
+            "base_url": "https://api.deepseek.com/v1",
+            "model": "deepseek-chat",
+            "target_language": "简体中文",
+            "ui": {},
+            "behavior": {"read_selection": false, "double_press_copies": false},
+            "window": {
+                "position_mode": "anchor",
+                "anchor": "custom",
+                "note_width": 640,
+                "note_height": 520,
+                "pinned": true,
+                "fixed_x": 1280,
+                "fixed_y": -40
+            }
+        }"#,
+    )
+    .unwrap();
+    assert!(!input.behavior.read_selection);
+    assert!(!input.behavior.double_press_copies);
+    assert_eq!(input.window.anchor, "custom");
+    assert_eq!(input.window.note_width, 640);
+    assert_eq!(input.window.note_height, 520);
+    assert!(input.window.pinned);
+    assert_eq!(input.window.fixed_x, Some(1280));
+    assert_eq!(input.window.fixed_y, Some(-40));
+
+    // 0.3 设置页不会发送新字段：缺省即默认值。
+    let legacy: ConfigInput = serde_json::from_str(
+        r#"{
+            "base_url": "https://api.deepseek.com/v1",
+            "model": "deepseek-chat",
+            "target_language": "简体中文",
+            "ui": {},
+            "behavior": {}
+        }"#,
+    )
+    .unwrap();
+    assert!(legacy.behavior.read_selection);
+    assert!(legacy.behavior.double_press_copies);
+    assert_eq!(legacy.window.note_width, DEFAULT_NOTE_WIDTH);
+    assert_eq!(legacy.window.fixed_x, None);
+}
+
+#[test]
+fn m4_export_and_import_round_trip_new_fields() {
+    let mut config = StoredConfig::default();
+    config.behavior.read_selection = false;
+    config.behavior.double_press_copies = false;
+    config.window.position_mode = POSITION_MODE_ANCHOR.into();
+    config.window.anchor = ANCHOR_CUSTOM.into();
+    config.window.note_width = 700;
+    config.window.note_height = 480;
+    config.window.pinned = true;
+    config.window.fixed_x = Some(-300);
+    config.window.fixed_y = Some(120);
+
+    let exported = build_export(&config, "2026-11-15T20:00:00+08:00");
+    assert_eq!(exported["behavior"]["read_selection"], Value::from(false));
+    assert_eq!(
+        exported["behavior"]["double_press_copies"],
+        Value::from(false)
+    );
+    assert_eq!(exported["window"]["note_width"], Value::from(700));
+    assert_eq!(exported["window"]["note_height"], Value::from(480));
+    assert_eq!(exported["window"]["pinned"], Value::from(true));
+    assert_eq!(exported["window"]["fixed_x"], Value::from(-300));
+    assert_eq!(exported["window"]["fixed_y"], Value::from(120));
+    assert_eq!(exported["window"]["anchor"], ANCHOR_CUSTOM);
+
+    let imported = parse_import(&exported.to_string()).unwrap();
+    assert!(!imported.behavior.read_selection);
+    assert!(!imported.behavior.double_press_copies);
+    assert_eq!(imported.window.note_width, 700);
+    assert_eq!(imported.window.note_height, 480);
+    assert!(imported.window.pinned);
+    assert_eq!(imported.window.fixed_x, Some(-300));
+    assert_eq!(imported.window.fixed_y, Some(120));
+    assert_eq!(imported.window.anchor, ANCHOR_CUSTOM);
+}
+
+#[test]
+fn m4_merge_window_for_save_keeps_last_but_clears_fixed() {
+    let stored = WindowConfig {
+        last_x: Some(12),
+        last_y: Some(34),
+        fixed_x: Some(1280),
+        fixed_y: Some(640),
+        ..WindowConfig::default()
+    };
+
+    let incoming = WindowConfig::default();
+    let merged = merge_window_for_save(incoming, &stored);
+    // last_* 的 None 表示设置页没带，保留磁盘值。
+    assert_eq!(merged.last_x, Some(12));
+    assert_eq!(merged.last_y, Some(34));
+    // fixed_* 的 None 表示清除取点，不能继承磁盘值。
+    assert_eq!(merged.fixed_x, None);
+    assert_eq!(merged.fixed_y, None);
+
+    let incoming = WindowConfig {
+        fixed_x: Some(7),
+        fixed_y: Some(8),
+        ..WindowConfig::default()
+    };
+    let merged = merge_window_for_save(incoming, &stored);
+    assert_eq!(merged.fixed_x, Some(7));
+    assert_eq!(merged.fixed_y, Some(8));
+    assert_eq!(merged.last_x, Some(12));
+    assert_eq!(merged.last_y, Some(34));
+}
+
+#[test]
+fn m4_format_recent_label_truncates_and_flattens_text() {
+    // 短译文不截断、不加省略号。
+    assert_eq!(
+        format_recent_label("20:31", "这是 LingoNote 的模拟翻译"),
+        "20:31  这是 LingoNote 的模拟翻译"
+    );
+
+    // 超过 20 个字符：截 20 字并加省略号。
+    let long = "1234567890123456789012345";
+    assert_eq!(format_recent_label("09:05", long), "09:05  12345678901234567890…");
+
+    // 刚好 20 字：不额外加省略号。
+    let exact = "12345678901234567890";
+    assert_eq!(format_recent_label("23:59", exact), "23:59  12345678901234567890");
+
+    // 换行/连续空白压成单个空格。
+    assert_eq!(
+        format_recent_label("08:00", "第一行\n第二行\r\n  第三行"),
+        "08:00  第一行 第二行 第三行"
+    );
+
+    // 纯空白译文只保留时间（不会出现换行）。
+    assert_eq!(format_recent_label("08:00", " \n\t "), "08:00");
+    assert!(!format_recent_label("08:00", "a\nb").contains('\n'));
+}
+
+#[test]
+fn m4_preview_text_handles_unicode_and_limits() {
+    // 按字符（不是字节）截断，中文不会被切坏。
+    let twenty = "中文字符中文字符中文字符中文字符中文字符";
+    assert_eq!(twenty.chars().count(), RECENT_PREVIEW_CHARS);
+    assert_eq!(preview_text(twenty), twenty);
+    assert_eq!(preview_text(&format!("{twenty}额外")), format!("{twenty}…"));
+    assert_eq!(preview_text("  前后空白  "), "前后空白");
+    assert_eq!(preview_text(""), "");
+}
+
+#[test]
+fn m4_config_view_serializes_new_window_fields() {
+    let mut behavior = BehaviorConfig::default();
+    behavior.read_selection = false;
+    behavior.double_press_copies = false;
+    let window = WindowConfig {
+        position_mode: POSITION_MODE_ANCHOR.into(),
+        anchor: ANCHOR_CUSTOM.into(),
+        note_width: 640,
+        note_height: 520,
+        pinned: true,
+        fixed_x: Some(1280),
+        fixed_y: Some(640),
+        ..WindowConfig::default()
+    };
+
+    let view = ConfigView {
+        schema_version: SCHEMA_VERSION,
+        base_url: "https://api.deepseek.com/v1".into(),
+        model: "deepseek-chat".into(),
+        target_language: "简体中文".into(),
+        hotkey: "Alt+Q".into(),
+        ui: UiConfig::default(),
+        window,
+        behavior,
+        prompt: String::new(),
+        default_prompt: DEFAULT_PROMPT.to_string(),
+        history: HistoryConfig::default(),
+        logging: LoggingConfig::default(),
+        has_api_key: false,
+        warning: None,
+    };
+    let value = serde_json::to_value(&view).unwrap();
+    assert_eq!(value["behavior"]["read_selection"], Value::from(false));
+    assert_eq!(
+        value["behavior"]["double_press_copies"],
+        Value::from(false)
+    );
+    assert_eq!(value["window"]["note_width"], Value::from(640));
+    assert_eq!(value["window"]["note_height"], Value::from(520));
+    assert_eq!(value["window"]["pinned"], Value::from(true));
+    assert_eq!(value["window"]["fixed_x"], Value::from(1280));
+    assert_eq!(value["window"]["fixed_y"], Value::from(640));
+    assert_eq!(value["window"]["anchor"], ANCHOR_CUSTOM);
+}

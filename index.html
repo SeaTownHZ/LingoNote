@@ -19,6 +19,7 @@
           <button class="icon-btn" id="copy" type="button" title="复制译文">复制</button>
           <button class="icon-btn" id="retry" type="button" title="重新翻译">重试</button>
           <button class="icon-btn" id="settings" type="button" title="设置">设置</button>
+          <button class="icon-btn" id="pin" type="button" title="钉住" aria-pressed="false">📌</button>
           <button class="icon-btn" id="close" type="button" title="关闭（Esc）">×</button>
         </div>
       </header>
@@ -42,6 +43,9 @@
         <span id="meta"></span>
       </footer>
     </div>
+
+    <div id="resize" title="拖动调整大小"></div>
+    <div id="toast" class="hidden" role="status" aria-live="polite"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

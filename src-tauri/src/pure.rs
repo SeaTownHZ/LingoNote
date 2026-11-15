@@ -25,6 +25,20 @@ pub const POSITION_MODE_REMEMBER: &str = "remember";
 /// 九宫格锚点默认值；未知值回落 `bottom-right`。
 pub const DEFAULT_ANCHOR: &str = "bottom-right";
 
+/// 自定义锚点：取点得到的 `fixed_x/fixed_y` 作为便签左上角。
+pub const ANCHOR_CUSTOM: &str = "custom";
+
+/// 便签默认尺寸与可调范围（物理像素，SPEC 3）。
+pub const DEFAULT_NOTE_WIDTH: u32 = 420;
+pub const DEFAULT_NOTE_HEIGHT: u32 = 360;
+pub const NOTE_MIN_WIDTH: u32 = 320;
+pub const NOTE_MAX_WIDTH: u32 = 900;
+pub const NOTE_MIN_HEIGHT: u32 = 220;
+pub const NOTE_MAX_HEIGHT: u32 = 900;
+
+/// 托盘「最近翻译」每条预览保留的字符数（SPEC 4.5）。
+pub const RECENT_PREVIEW_CHARS: usize = 20;
+
 /// 固定位置（anchor）时到工作区边缘的边距（像素）。
 pub const DEFAULT_MARGIN: i32 = 16;
 pub const MIN_MARGIN: i32 = 0;
@@ -75,13 +89,21 @@ impl Default for UiConfig {
 pub struct WindowConfig {
     /// `cursor` 跟随鼠标 / `anchor` 固定位置 / `remember` 记住上次。
     pub position_mode: String,
-    /// 九宫格锚点：`top-left` … `bottom-right`，`center` 居中。
+    /// 九宫格锚点：`top-left` … `bottom-right`，`center` 居中，`custom` 用取点坐标。
     pub anchor: String,
     pub margin_x: i32,
     pub margin_y: i32,
     /// 上次显示/拖动后的坐标（物理像素）；由 Rust 侧维护，设置页不发送。
     pub last_x: Option<i32>,
     pub last_y: Option<i32>,
+    /// 便签宽高（物理像素，320–900 / 220–900）。
+    pub note_width: u32,
+    pub note_height: u32,
+    /// 是否钉住便签（忽略失焦隐藏）。
+    pub pinned: bool,
+    /// 屏幕取点得到的左上角坐标（物理像素，可为负）；`anchor == "custom"` 时生效。
+    pub fixed_x: Option<i32>,
+    pub fixed_y: Option<i32>,
 }
 
 impl Default for WindowConfig {
@@ -93,6 +115,11 @@ impl Default for WindowConfig {
             margin_y: DEFAULT_MARGIN,
             last_x: None,
             last_y: None,
+            note_width: DEFAULT_NOTE_WIDTH,
+            note_height: DEFAULT_NOTE_HEIGHT,
+            pinned: false,
+            fixed_x: None,
+            fixed_y: None,
         }
     }
 }
@@ -110,6 +137,12 @@ pub struct BehaviorConfig {
     /// 启动时自动检查更新；旧配置缺省为 true（SPEC 3.1）。
     #[serde(default = "default_true")]
     pub check_updates: bool,
+    /// 热键触发时优先读取当前选区（默认开，SPEC 4.1）。
+    #[serde(default = "default_true")]
+    pub read_selection: bool,
+    /// 便签有译文时再次按热键＝复制译文并收起（默认开，SPEC 4.5 / FR-18）。
+    #[serde(default = "default_true")]
+    pub double_press_copies: bool,
 }
 
 /// 布尔字段缺省值：更新检查默认开启。
@@ -126,6 +159,8 @@ impl Default for BehaviorConfig {
             pause_hotkey: false,
             max_chars: DEFAULT_MAX_CHARS,
             check_updates: true,
+            read_selection: true,
+            double_press_copies: true,
         }
     }
 }
@@ -402,19 +437,49 @@ fn normalize_position_mode(value: &str) -> String {
 fn normalize_anchor(value: &str) -> String {
     match value.trim().to_ascii_lowercase().as_str() {
         "top-left" | "top-center" | "top-right" | "center-left" | "center"
-        | "center-right" | "bottom-left" | "bottom-center" | "bottom-right" => {
+        | "center-right" | "bottom-left" | "bottom-center" | "bottom-right" | "custom" => {
             value.trim().to_ascii_lowercase()
         }
         _ => DEFAULT_ANCHOR.into(),
     }
 }
 
-/// 位置策略归一化：未知模式回落 `cursor`，未知锚点回落 `bottom-right`，边距钳制。
+/// 便签尺寸夹紧到 SPEC 3 的范围：宽 320–900，高 220–900。
+pub fn clamp_note_size(width: u32, height: u32) -> (u32, u32) {
+    (
+        clamp_u32(width, NOTE_MIN_WIDTH, NOTE_MAX_WIDTH),
+        clamp_u32(height, NOTE_MIN_HEIGHT, NOTE_MAX_HEIGHT),
+    )
+}
+
+/// 位置策略归一化：未知模式回落 `cursor`，未知锚点回落 `bottom-right`，边距钳制，
+/// 尺寸钳制，`custom` 缺少任一取点坐标时回退 `bottom-right`（SPEC 3）。
 fn normalize_window_config(mut window: WindowConfig) -> WindowConfig {
     window.position_mode = normalize_position_mode(&window.position_mode);
     window.anchor = normalize_anchor(&window.anchor);
     window.margin_x = window.margin_x.clamp(MIN_MARGIN, MAX_MARGIN);
     window.margin_y = window.margin_y.clamp(MIN_MARGIN, MAX_MARGIN);
+    let (width, height) = clamp_note_size(window.note_width, window.note_height);
+    window.note_width = width;
+    window.note_height = height;
+    if window.anchor == ANCHOR_CUSTOM && (window.fixed_x.is_none() || window.fixed_y.is_none()) {
+        window.anchor = DEFAULT_ANCHOR.into();
+    }
+    window
+}
+
+/// 保存设置时合并窗口字段（SPEC 3）：
+///
+/// - `last_x/last_y` 的 `None` 表示“设置页没有携带”，保留磁盘上记住的位置；
+/// - `fixed_x/fixed_y` 的 `None` 表示“清除取点”，**不**继承磁盘值。
+pub fn merge_window_for_save(incoming: WindowConfig, stored: &WindowConfig) -> WindowConfig {
+    let mut window = incoming;
+    if window.last_x.is_none() {
+        window.last_x = stored.last_x;
+    }
+    if window.last_y.is_none() {
+        window.last_y = stored.last_y;
+    }
     window
 }
 
@@ -610,6 +675,28 @@ pub fn anchor_position(
     };
 
     clamp_position((x, y), win, work)
+}
+
+/// 便签/托盘里的单行预览：换行与连续空白压成单个空格，最多 20 个字符，超出加省略号。
+pub fn preview_text(text: &str) -> String {
+    let flattened = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = flattened.chars();
+    let preview: String = chars.by_ref().take(RECENT_PREVIEW_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{preview}…")
+    } else {
+        preview
+    }
+}
+
+/// 托盘「最近翻译」条目文案：`20:31  译文前 20 字…`（SPEC 4.5）。
+pub fn format_recent_label(at: &str, text: &str) -> String {
+    let preview = preview_text(text);
+    if preview.is_empty() {
+        at.trim().to_string()
+    } else {
+        format!("{at}  {preview}")
+    }
 }
 
 /// 导出配置为 JSON；`StoredConfig` 的 `api_key` 字段本身不参与序列化。

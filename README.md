@@ -4,13 +4,13 @@
 [![release](https://img.shields.io/github/v/release/SeaTownHZ/LingoNote.svg)](https://github.com/SeaTownHZ/LingoNote/releases)
 [![license: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-复制文本，按 `Alt+Q`，在光标旁看译文。
+复制或选中文本，按 `Alt+Q`，在光标旁看译文；再按一次复制译文并收起。
 
-LingoNote 是一个轻量的剪贴板翻译小工具：读取剪贴板文本，调用你自己配置的 OpenAI 兼容大模型接口，用一张可自定义的便签显示流式译文。无账号、无广告、无遥测。
+LingoNote 是一个轻量的剪贴板翻译小工具：读取剪贴板文本或当前选中文本，调用你自己配置的 OpenAI 兼容大模型接口，用一张可自定义的便签显示流式译文。无账号、无广告、无遥测。
 
 ![LingoNote 设置页](docs/images/m2-settings.png)
 
-当前状态：**M3 更新与发布闭环完成（0.3.0）**。在 M2（单实例、可编辑系统提示词、暂停热键、本地历史、配置导入/导出、滚动日志、配置原子写入与损坏备份、设置页五分区与自动保存）基础上，新增启动时自动检查更新与关于页手动检查更新（发现新版本可跳转 Release 页下载）、三处版本号归一，以及 `v*` tag 自动创建 Draft Release 的发布流水线；便签位置三模式、不透明度与位置记忆已并入本版本（M2.5 未单独发版）。构建与单元/集成测试已验证；安装包与手动 UI 验收见 [`docs/M2-验证记录.md`](docs/M2-验证记录.md)，版本变更见 [`CHANGELOG.md`](CHANGELOG.md)。macOS 仍为 beta/未验证。
+当前状态：**M4 手感与触发（0.4.0）**。在 M3（更新检查与下载跳转、`v*` tag 自动创建 Draft Release 的发布流水线）基础上，新增选中文本直读、热键录制控件、连按复制译文并关闭、便签拖拽尺寸与钉住、固定位置屏幕取点，以及托盘「最近翻译」（会话内 5 条）；配置仍为增量字段、`schema_version` 保持 2，旧配置可直接读取。构建与单元/集成测试见下文，历史验收记录见 [`docs/M2-验证记录.md`](docs/M2-验证记录.md) 与 [`docs/M3-验证记录.md`](docs/M3-验证记录.md)，版本变更见 [`CHANGELOG.md`](CHANGELOG.md)。macOS 仍为 beta/未验证。
 
 ## 已实现
 
@@ -51,6 +51,15 @@ LingoNote 是一个轻量的剪贴板翻译小工具：读取剪贴板文本，�
 - **结果提示**：发现新版本时状态行显示版本号与「下载」入口，点击打开系统浏览器到 Release 页；已是最新或检查失败都有中文状态行，不弹窗、不抢焦点。
 - **版本与发布**：三处版本号统一为 `0.3.0`，新增 [`CHANGELOG.md`](CHANGELOG.md)；推送 `v*` tag 自动构建 Windows/macOS 产物并创建 Draft Release。
 
+### M4 新增（手感与触发）
+
+- **选中文本直读**：按热键时优先翻译当前选中文本，不必先 `Ctrl+C`；应用模拟一次复制并在取到后恢复原剪贴板，选区为空或 200ms 内未取到就静默回退剪贴板文本；可在「语言与行为」关闭。
+- **热键录制**：设置页「录制」按钮直接按组合键完成绑定（至少一个修饰键，`Esc` 取消），也仍支持手动输入。
+- **连按复制并关闭**：便签已有译文时再按热键＝复制译文 + 收起便签 + 「已复制译文」轻提示；可在设置中关闭。
+- **便签尺寸与钉住**：右下角拖拽改变宽高（320–900 × 220–900，默认 420×360）并记住；图钉钉住后不再因失焦或点击其他窗口而隐藏。
+- **屏幕取点**：固定位置新增「自定义位置」，用只覆盖当前显示器的遮罩点选便签左上角；便签隐藏时会预览 800ms，可随时清除。
+- **托盘最近翻译**：会话内最近 5 条成功译文，点击即复制，仅存内存、不落盘。
+
 ## 开发环境
 
 - Node.js 20+（本机验证：24）。
@@ -66,7 +75,7 @@ npm install
 npm run tauri dev
 ```
 
-首次启动会打开设置。填入 DeepSeek API Key（或使用下面的 mock 服务），保存后关闭设置，复制一段文字，按热键。
+首次启动会打开设置。填入 DeepSeek API Key（或使用下面的 mock 服务），保存后关闭设置，选中一段文字（或复制一段文字），按热键。
 
 ## 用 mock 服务测试（不消耗 API 额度）
 
@@ -101,13 +110,13 @@ npm run tauri build
 产物：
 
 - `src-tauri/target/release/lingonote.exe`
-- `src-tauri/target/release/bundle/nsis/LingoNote_0.3.0_x64-setup.exe`
+- `src-tauri/target/release/bundle/nsis/LingoNote_0.4.0_x64-setup.exe`
 
 ## 更新与发布
 
 - **检查更新**：设置页「关于」有「检查更新」按钮；启动后也会自动检查一次（可用「启动时检查更新」关闭）。检查只读取 GitHub Releases 的最新 `tag_name`，不下载、不上传任何数据。
 - **下载**：发现新版本时点「下载」会由系统浏览器打开对应的 Release 页面，安装包由你自行下载安装。
-- **发版流程**：推送 `v*` tag（如 `v0.3.0`）触发 `.github/workflows/release.yml`，构建 Windows NSIS 安装包与 macOS 压缩包，并以 **Draft Release** 形式创建在对应 tag 下，人工确认说明后再手动发布；普通推送与 PR 只跑 `build.yml` 构建校验。
+- **发版流程**：推送 `v*` tag（如 `v0.4.0`）触发 `.github/workflows/release.yml`，构建 Windows NSIS 安装包与 macOS 压缩包，并以 **Draft Release** 形式创建在对应 tag 下，人工确认说明后再手动发布；普通推送与 PR 只跑 `build.yml` 构建校验。
 - **变更记录**：见 [`CHANGELOG.md`](CHANGELOG.md)。
 
 ## 测试
@@ -117,7 +126,7 @@ cd src-tauri
 cargo test
 ```
 
-当前覆盖：URL 规范化、HTTP 错误映射、默认/自定义提示词、M0 配置兼容、schema 归一化、API Key 不落盘、导出不含 Key、导入校验、历史上限、原子写入、日志级别/单行化、最大字符数、热键格式解析，以及 M3 的版本归一/比较（`normalize_version`、`is_newer`），全部通过。
+当前共有 ≥45 个单元/集成测试，覆盖：URL 规范化、HTTP 错误映射、默认/自定义提示词、M0 配置兼容、schema 归一化、API Key 不落盘、导出不含 Key、导入校验、历史上限、原子写入、日志级别/单行化、最大字符数、热键格式解析、M3 的版本归一/比较（`normalize_version`、`is_newer`），以及 M4 的配置增量（`custom` 锚点、便签尺寸与取点坐标）和最近翻译队列，全部通过。
 
 > Windows GNU 工具链下，库测试二进制会因 WebView2Loader 入口点问题无法启动，所以 `[lib] test = false`，测试放在 `src-tauri/tests/` 的纯逻辑目标中。
 
@@ -154,10 +163,11 @@ M3 的运行时验收见 `docs/M3-验证记录.md`。
 
 - 历史以 `history.json` 保存（需求原写 SQLite `history.db`）；200 条规模无需引入数据库，文件为明文，默认关闭。
 - 未实现应用内自动更新（只检查并跳转 Release 页手动下载）、划词/OCR（对应需求 P2/P1 未完成项）。
-- 热键录制仍是文本输入 + 应用按钮，不是按键捕获控件；格式需手写（如 `Alt+Q`、`Ctrl+Shift+T`）。
+- 直读依赖模拟 `Ctrl+C`：远程桌面、管理员窗口或禁用复制的控件可能取不到选区，200ms 后静默回退剪贴板；原剪贴板为图片/富文本时只恢复文本部分（日志记降级）。
+- 屏幕取点只覆盖光标所在的当前显示器；多屏需切到目标屏重新取点。显示器拔插或分辨率变化后，出现便签前会按工作区夹紧坐标。
+- 托盘「最近翻译」仅存本次会话内存（最多 5 条），重启清空，不写入历史文件。
 - 日志目录使用 Tauri 的 app log dir（`%LOCALAPPDATA%\com.lingonote.desktop\logs`），不是需求草案里的 `%LOCALAPPDATA%\LingoNote`。
 - macOS 尚未在真机验证；CI 工作流见 `.github/workflows/build.yml`（构建校验）与 `.github/workflows/release.yml`（tag 发版）。
-- 便签高度固定 360px；长文本内部滚动。
 - 开机自启在开发模式下会注册 dev exe，正式使用请装安装版；安装版的自启指向安装目录下的 exe。
 - GNU 链接警告 `multiple non-default manifests` 仍在，不影响启动。
 
@@ -172,11 +182,12 @@ M3 的运行时验收见 `docs/M3-验证记录.md`。
 ## 目录
 
 ```
-docs/                M0/M1/M2/M3 验证记录与界面截图
+docs/                M0–M3 验证记录与界面截图
 design/              LingoNote 图标与生成脚本
-src/                 便签 + 设置前端
+src/                 便签 + 设置前端；M4 新增 note.css、settings-extra.css、position-pick.ts
 src-tauri/           Tauri/Rust 后端
 scripts/             mock SSE 服务
+position-pick.html   屏幕取点遮罩页（M4 新增）
 CHANGELOG.md         更新日志
 ```
 

@@ -22,6 +22,7 @@ export default defineConfig({
       input: {
         main: "index.html",
         settings: "settings.html",
+        "position-pick": "position-pick.html",
       },
     },
   },

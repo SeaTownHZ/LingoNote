@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LingoNote 取点</title>
+    <style>
+      /* 取点遮罩页：样式内联，不改 src/styles.css（SPEC 4.4）。 */
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        background: rgba(0, 0, 0, 0.25);
+      }
+
+      body {
+        cursor: crosshair;
+        user-select: none;
+        font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+      }
+
+      #tip {
+        position: fixed;
+        top: 16px;
+        left: 50%;
+        z-index: 10;
+        transform: translateX(-50%);
+        padding: 8px 18px;
+        border-radius: 999px;
+        background: rgba(20, 26, 24, 0.86);
+        color: #f5f9f8;
+        font-size: 13px;
+        line-height: 1.4;
+        white-space: nowrap;
+        box-shadow: 0 8px 22px rgba(0, 0, 0, 0.28);
+        pointer-events: none;
+      }
+
+      #outline {
+        position: absolute;
+        top: 0;
+        left: 0;
+        box-sizing: border-box;
+        border: 1.5px solid #2f9e8f;
+        border-radius: 4px;
+        background: rgba(47, 158, 143, 0.1);
+        pointer-events: none;
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="tip">点击目标位置 · Esc 取消</div>
+    <div id="outline"></div>
+    <script type="module" src="/src/position-pick.ts"></script>
+  </body>
+</html>
