@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LingoNote</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body class="note-body">
+    <div class="note-shell">
+      <header class="note-bar" data-tauri-drag-region>
+        <div class="brand">
+          <span class="dot"></span>
+          <b>LingoNote</b>
+          <span id="lang">简中</span>
+        </div>
+        <div class="actions">
+          <button class="icon-btn" id="toggle-original" type="button" title="显示原文">原文</button>
+          <button class="icon-btn" id="copy" type="button" title="复制译文">复制</button>
+          <button class="icon-btn" id="retry" type="button" title="重新翻译">重试</button>
+          <button class="icon-btn" id="settings" type="button" title="设置">设置</button>
+          <button class="icon-btn" id="close" type="button" title="关闭（Esc）">×</button>
+        </div>
+      </header>
+
+      <main class="note-content" id="content">
+        <div class="loading" id="loading">
+          <div class="skeleton" style="width: 82%"></div>
+          <div class="skeleton" style="width: 64%"></div>
+          <div class="skeleton" style="width: 74%"></div>
+        </div>
+        <div class="translation" id="translation"></div>
+        <div class="error hidden" id="error"></div>
+        <div class="original hidden" id="original-wrap">
+          <div class="original-label">原文</div>
+          <div id="original"></div>
+        </div>
+      </main>
+
+      <footer class="footer">
+        <span id="status">Alt+Q 翻译剪贴板</span>
+        <span id="meta"></span>
+      </footer>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

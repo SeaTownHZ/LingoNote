@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LingoNote 设置</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body class="settings-body">
+    <main class="settings-shell">
+      <aside class="settings-side">
+        <div class="side-brand">
+          <div class="brand-lg"><span class="dot"></span> LingoNote</div>
+          <p class="side-sub">语签 · 剪贴板翻译</p>
+        </div>
+
+        <nav class="settings-nav" aria-label="设置分区">
+          <button class="nav-btn active" type="button" data-page="general">通用</button>
+          <button class="nav-btn" type="button" data-page="service">翻译服务</button>
+          <button class="nav-btn" type="button" data-page="appearance">外观</button>
+          <button class="nav-btn" type="button" data-page="advanced">高级</button>
+          <button class="nav-btn" type="button" data-page="about">关于</button>
+        </nav>
+
+        <div class="side-foot">
+          <span class="side-note">修改后自动保存</span>
+          <button id="close" class="secondary-btn" type="button">关闭设置</button>
+          <button id="quit" class="danger-btn" type="button">退出应用</button>
+        </div>
+      </aside>
+
+      <section class="settings-main">
+        <header class="settings-header">
+          <div>
+            <h1 id="page-title">通用</h1>
+            <p class="settings-sub" id="page-desc">热键、目标语言与便签行为。</p>
+          </div>
+          <span id="save-hint" class="save-hint"></span>
+        </header>
+
+        <div id="config-warning" class="config-warning hidden">
+          <span id="config-warning-text"></span>
+          <button id="dismiss-warning" class="ghost-btn" type="button">知道了</button>
+        </div>
+
+        <div class="page active" data-page="general">
+          <section class="settings-card">
+            <h2>快捷键</h2>
+            <p class="hint">
+              格式示例：Alt+Q、Ctrl+Shift+T、CommandOrControl+Q。被占用时会提示，旧热键保留。
+            </p>
+            <div class="hotkey-row">
+              <input id="hotkey" type="text" spellcheck="false" placeholder="Alt+Q" />
+              <button id="apply-hotkey" class="secondary-btn" type="button">应用热键</button>
+              <span id="hotkey-result" class="test-result"></span>
+            </div>
+            <label class="check-row">
+              <input id="pause-hotkey" type="checkbox" />
+              <span>暂停全局热键（暂停后仍可用托盘菜单「翻译剪贴板」）</span>
+            </label>
+          </section>
+
+          <section class="settings-card">
+            <h2>语言与行为</h2>
+            <label class="field">
+              <span>目标语言</span>
+              <input
+                id="target-language"
+                type="text"
+                list="language-options"
+                spellcheck="false"
+                placeholder="简体中文"
+              />
+              <datalist id="language-options">
+                <option value="简体中文"></option>
+                <option value="繁體中文"></option>
+                <option value="English"></option>
+                <option value="日本語"></option>
+                <option value="한국어"></option>
+                <option value="Français"></option>
+                <option value="Deutsch"></option>
+                <option value="Español"></option>
+                <option value="Русский"></option>
+              </datalist>
+            </label>
+            <label class="check-row">
+              <input id="hide-on-blur" type="checkbox" />
+              <span>点击其他窗口时隐藏便签（仅对已点击过的便签生效）</span>
+            </label>
+            <label class="check-row">
+              <input id="appear-focused" type="checkbox" />
+              <span>便签出现时直接获得焦点（默认关，避免打断正在输入的内容）</span>
+            </label>
+            <label class="check-row">
+              <input id="copy-restores" type="checkbox" />
+              <span>复制译文 1 秒后恢复原剪贴板</span>
+            </label>
+          </section>
+
+          <section class="settings-card compact">
+            <h2>启动</h2>
+            <label class="check-row">
+              <input id="autostart" type="checkbox" />
+              <span>开机自动启动</span>
+            </label>
+          </section>
+        </div>
+
+        <div class="page" data-page="service">
+          <section class="settings-card">
+            <h2>翻译服务</h2>
+            <p class="hint">兼容 OpenAI Chat Completions 接口。默认 DeepSeek，也可以改成任意兼容服务。</p>
+
+            <label class="field">
+              <span>服务预设</span>
+              <select id="preset">
+                <option value="deepseek">DeepSeek（默认）</option>
+                <option value="custom">自定义 / 其他 OpenAI 兼容服务</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>Base URL</span>
+              <input id="base-url" type="text" spellcheck="false" placeholder="https://api.deepseek.com/v1" />
+            </label>
+
+            <label class="field">
+              <span>API Key</span>
+              <div class="key-row">
+                <input id="api-key" type="password" spellcheck="false" placeholder="sk-..." />
+                <button id="toggle-key" class="ghost-btn" type="button">显示</button>
+                <button id="save-key" class="secondary-btn" type="button">保存 Key</button>
+              </div>
+            </label>
+            <p class="hint" id="key-hint">API Key 保存在系统凭据库，不写入配置文件。</p>
+
+            <label class="field">
+              <span>模型</span>
+              <input id="model" type="text" spellcheck="false" placeholder="deepseek-chat" />
+            </label>
+
+            <div class="test-row">
+              <button id="test" class="secondary-btn" type="button">测试连接</button>
+              <span id="test-result" class="test-result"></span>
+            </div>
+          </section>
+
+          <section class="settings-card">
+            <h2>系统提示词</h2>
+            <p class="hint">
+              用 <code>{target_language}</code> 表示目标语言；清空或恢复默认后使用内置提示词。内容会随每次翻译发给模型。
+            </p>
+            <textarea id="prompt" class="prompt-area" rows="12" spellcheck="false"></textarea>
+            <div class="test-row">
+              <button id="reset-prompt" class="secondary-btn" type="button">恢复默认提示词</button>
+              <span id="prompt-hint" class="test-result"></span>
+            </div>
+          </section>
+        </div>
+
+        <div class="page" data-page="appearance">
+          <section class="settings-card">
+            <h2>主题</h2>
+            <p class="hint">主题只填充下面的颜色与字体，之后仍可逐项微调。</p>
+            <div class="theme-row">
+              <button class="theme-btn" type="button" data-theme="paper">便签白</button>
+              <button class="theme-btn" type="button" data-theme="cream">奶油黄</button>
+              <button class="theme-btn" type="button" data-theme="green">护眼绿</button>
+              <button class="theme-btn" type="button" data-theme="night">夜间墨</button>
+              <button class="theme-btn" type="button" data-theme="sepia">纸质米</button>
+            </div>
+          </section>
+
+          <section class="settings-card">
+            <h2>便签外观</h2>
+            <div class="grid-2">
+              <label class="field">
+                <span>背景色</span>
+                <input id="background" type="color" value="#FFFFFF" />
+              </label>
+              <label class="field">
+                <span>文字颜色</span>
+                <input id="foreground" type="color" value="#111111" />
+              </label>
+            </div>
+
+            <label class="field">
+              <span>字体</span>
+              <input id="font-family" type="text" spellcheck="false" placeholder="SimSun" />
+            </label>
+
+            <div class="grid-3">
+              <label class="field">
+                <span>字号（px）</span>
+                <input id="font-size" type="number" min="10" max="48" step="1" value="16" />
+              </label>
+              <label class="field">
+                <span>行高</span>
+                <input id="line-height" type="number" min="1" max="3" step="0.05" value="1.65" />
+              </label>
+              <label class="field">
+                <span>圆角（px）</span>
+                <input id="radius" type="number" min="0" max="32" step="1" value="12" />
+              </label>
+            </div>
+
+            <div class="preview-note" id="preview">
+              这是一段示例译文。
+              <br />第二行用于预览字体、字号、颜色与圆角。
+            </div>
+
+            <div class="test-row">
+              <button id="reset-appearance" class="secondary-btn" type="button">恢复默认外观</button>
+              <span id="appearance-hint" class="test-result"></span>
+            </div>
+          </section>
+        </div>
+
+        <div class="page" data-page="advanced">
+          <section class="settings-card compact">
+            <h2>翻译行为</h2>
+            <label class="field">
+              <span>最大字符数（超过则提示，不发起请求）</span>
+              <input id="max-chars" type="number" min="1000" max="100000" step="1000" value="20000" />
+            </label>
+          </section>
+
+          <section class="settings-card">
+            <h2>本地历史</h2>
+            <p class="hint">
+              开启后仅在本机保存最近 200 条翻译，不上传、不记录 API Key。历史文件为明文，介意时请保持关闭。
+            </p>
+            <label class="check-row">
+              <input id="history-enabled" type="checkbox" />
+              <span>保存本地翻译历史</span>
+            </label>
+            <div class="history-toolbar">
+              <input id="history-search" type="search" spellcheck="false" placeholder="搜索原文或译文…" />
+              <span id="history-count" class="test-result"></span>
+              <button id="clear-history" class="danger-btn" type="button">清空历史</button>
+            </div>
+            <div id="history-list" class="history-list"></div>
+          </section>
+
+          <section class="settings-card compact">
+            <h2>日志</h2>
+            <p class="hint">
+              默认关闭。开启后只记录时间、状态和错误，不记录翻译正文；文件超过 5MB 自动滚动，最多保留 3 个。
+            </p>
+            <label class="check-row">
+              <input id="logging-enabled" type="checkbox" />
+              <span>写入本地日志</span>
+            </label>
+            <label class="field">
+              <span>日志级别</span>
+              <select id="logging-level">
+                <option value="error">仅错误（推荐）</option>
+                <option value="info">信息</option>
+                <option value="debug">调试</option>
+              </select>
+            </label>
+            <p class="kv"><span>日志目录</span><code id="log-path">—</code></p>
+          </section>
+
+          <section class="settings-card compact">
+            <h2>配置与数据</h2>
+            <p class="hint">
+              导出的 JSON 不包含 API Key。导入会先备份当前配置，再用文件内容替换；API Key 保持本机已有值不变。
+            </p>
+            <div class="button-row">
+              <button id="export-config" class="secondary-btn" type="button">导出配置</button>
+              <button id="import-config" class="secondary-btn" type="button">导入配置</button>
+              <button id="reset-config" class="danger-btn" type="button">恢复默认设置</button>
+            </div>
+          </section>
+        </div>
+
+        <div class="page" data-page="about">
+          <section class="settings-card">
+            <h2>LingoNote（语签）</h2>
+            <p class="hint">复制文本，按热键，在光标旁看译文。无账号、无广告、无遥测。</p>
+            <p class="kv"><span>版本</span><code id="about-version">—</code></p>
+            <p class="kv"><span>应用标识</span><code id="about-identifier">—</code></p>
+            <p class="kv"><span>许可证</span><code>MIT</code></p>
+            <p class="kv"><span>开源地址</span><code>待发布</code></p>
+            <p class="kv"><span>配置文件</span><code id="about-config-path">—</code></p>
+            <p class="kv"><span>历史文件</span><code id="about-history-path">—</code></p>
+            <p class="kv"><span>日志目录</span><code id="about-log-path">—</code></p>
+          </section>
+
+          <section class="settings-card compact">
+            <h2>数据与隐私</h2>
+            <p class="hint">
+              翻译正文只会发往你配置的 endpoint。配置、历史和日志都只保存在本机；API Key 使用 Windows
+              凭据管理器（macOS 为 Keychain）保存。卸载时如需清除数据，请手动删除上面的目录。
+            </p>
+          </section>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="/src/settings.ts"></script>
+  </body>
+</html>
